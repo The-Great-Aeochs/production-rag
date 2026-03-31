@@ -1,0 +1,43 @@
+# Environment
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Docker volumes (if mapped locally)
+qdrant_data/
+pg_data/
+minio_data/
+
+# Documents (raw, potentially large)
+documents/
+
+# Models (large binary files)
+models/
+*.bin
+*.safetensors
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Eval outputs
+eval_results/
