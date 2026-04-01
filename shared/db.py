@@ -1,4 +1,5 @@
 import psycopg
+import redis
 from minio import Minio
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -13,6 +14,10 @@ from qdrant_client.models import (
 )
 
 from shared.config import settings
+
+
+def get_redis_client() -> redis.Redis:
+    return redis.from_url(settings.redis_url, decode_responses=True)
 
 
 def get_pg_conn() -> psycopg.Connection:

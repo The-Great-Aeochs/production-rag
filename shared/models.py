@@ -39,6 +39,38 @@ class Chunk(BaseModel):
     embedding: list[float] | None = None
 
 
+class QueryRequest(BaseModel):
+    """Input to the query pipeline."""
+
+    query: str
+    filters: dict | None = None
+    top_k: int = 5
+    use_cache: bool = True
+    stream: bool = False
+
+
+class RetrievalResult(BaseModel):
+    """A single retrieved chunk with its score."""
+
+    chunk_id: str
+    content: str
+    source_path: str
+    section_path: list[str] = Field(default_factory=list)
+    score: float
+    retrieval_method: str  # "semantic" | "keyword" | "hybrid"
+
+
+class QueryResponse(BaseModel):
+    """Output of the query pipeline."""
+
+    answer: str
+    sources: list[RetrievalResult] = Field(default_factory=list)
+    cached: bool = False
+    latency_ms: dict = Field(default_factory=dict)
+    model_used: str = ""
+    prompt_version: str = ""
+
+
 class IngestionJob(BaseModel):
     """Tracks a bulk ingestion run."""
 

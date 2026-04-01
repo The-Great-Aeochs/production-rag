@@ -21,11 +21,19 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://localhost:6379"
+    cache_ttl: int = 3600  # 1 hour default
+
+    # Ollama
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL"
 
     # Embedding
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     embedding_dim: int = 768
     embedding_batch_size: int = 256
+
+    # Reranker
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # Chunking
     chunk_min_tokens: int = 256
