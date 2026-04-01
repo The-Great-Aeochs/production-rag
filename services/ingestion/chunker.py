@@ -6,6 +6,7 @@ relationships for hierarchical retrieval.
 """
 
 import hashlib
+import uuid
 
 import tiktoken
 
@@ -13,6 +14,14 @@ from shared.config import settings
 from shared.models import Chunk, Section
 
 _enc = tiktoken.get_encoding("cl100k_base")
+
+
+_NAMESPACE = uuid.UUID("a3f1b2c4-d5e6-7890-abcd-ef1234567890")
+
+
+def _make_id(key: str) -> str:
+    """Deterministic UUID from a string key."""
+    return str(uuid.uuid5(_NAMESPACE, key))
 
 
 def count_tokens(text: str) -> int:
@@ -27,7 +36,7 @@ def chunk_sections(
     metadata: dict | None = None,
 ) -> list[Chunk]:
     """Convert parsed sections into chunks with overlap and hierarchy."""
-    doc_id = hashlib.sha256(source_path.encode()).hexdigest()[:16]
+    doc_id = _make_id(source_path)
     meta = metadata or {}
 
     raw_chunks: list[dict] = []
@@ -156,15 +165,13 @@ def _build_chunks(
             overlap_text = _enc.decode(prev_tokens[-overlap_tokens:])
             content = overlap_text + "\n\n" + content
 
-        chunk_id = hashlib.sha256(f"{source_path}:{i}".encode()).hexdigest()[:16]
+        chunk_id = _make_id(f"{source_path}:{i}")
         token_count = count_tokens(content)
 
         # Parent is the previous chunk at a higher level (lower number)
         parent_id = None
         if i > 0 and raw_chunks[i - 1]["level"] < level:
-            parent_id = hashlib.sha256(
-                f"{source_path}:{i - 1}".encode()
-            ).hexdigest()[:16]
+            parent_id = _make_id(f"{source_path}:{i - 1}")
 
         chunks.append(
             Chunk(

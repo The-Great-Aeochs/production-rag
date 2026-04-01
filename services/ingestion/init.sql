@@ -1,4 +1,4 @@
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS documents (
     doc_id          TEXT PRIMARY KEY,
     source_path     TEXT UNIQUE NOT NULL,
     doc_type        TEXT NOT NULL,
@@ -11,7 +11,7 @@ CREATE TABLE documents (
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE chunks (
+CREATE TABLE IF NOT EXISTS chunks (
     chunk_id        TEXT PRIMARY KEY,
     doc_id          TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
     content         TEXT NOT NULL,
@@ -25,21 +25,32 @@ CREATE TABLE chunks (
     metadata        JSONB DEFAULT '{}',
     embedding_model TEXT NOT NULL,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-
-    search_vector   TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(source_path, '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(array_to_string(section_path, ' '), '')), 'B') ||
-        setweight(to_tsvector('english', coalesce(content, '')), 'C')
-    ) STORED
+    search_vector   TSVECTOR
 );
 
-CREATE INDEX idx_chunks_doc_id ON chunks(doc_id);
-CREATE INDEX idx_chunks_source_path ON chunks(source_path);
-CREATE INDEX idx_chunks_search_vector ON chunks USING GIN(search_vector);
-CREATE INDEX idx_chunks_metadata ON chunks USING GIN(metadata);
-CREATE INDEX idx_documents_content_hash ON documents(content_hash);
+-- Trigger to keep search_vector in sync on insert/update
+CREATE OR REPLACE FUNCTION chunks_search_vector_update() RETURNS trigger AS $$
+BEGIN
+    NEW.search_vector :=
+        setweight(to_tsvector('english', coalesce(NEW.source_path, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(array_to_string(NEW.section_path, ' '), '')), 'B') ||
+        setweight(to_tsvector('english', coalesce(NEW.content, '')), 'C');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
 
-CREATE TABLE query_logs (
+DROP TRIGGER IF EXISTS chunks_search_vector_trigger ON chunks;
+CREATE TRIGGER chunks_search_vector_trigger
+    BEFORE INSERT OR UPDATE ON chunks
+    FOR EACH ROW EXECUTE FUNCTION chunks_search_vector_update();
+
+CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id);
+CREATE INDEX IF NOT EXISTS idx_chunks_source_path ON chunks(source_path);
+CREATE INDEX IF NOT EXISTS idx_chunks_search_vector ON chunks USING GIN(search_vector);
+CREATE INDEX IF NOT EXISTS idx_chunks_metadata ON chunks USING GIN(metadata);
+CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
+
+CREATE TABLE IF NOT EXISTS query_logs (
     log_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     query_text      TEXT NOT NULL,
     filters         JSONB,
@@ -54,9 +65,9 @@ CREATE TABLE query_logs (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_query_logs_created ON query_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_query_logs_created ON query_logs(created_at DESC);
 
-CREATE TABLE ingestion_jobs (
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
     job_id          TEXT PRIMARY KEY,
     status          TEXT NOT NULL DEFAULT 'pending',
     total_docs      INT DEFAULT 0,

@@ -10,7 +10,7 @@ import logging
 import psycopg
 from minio import Minio
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
+from qdrant_client.models import FilterSelector, FieldCondition, Filter, MatchValue, PointStruct
 
 from shared.config import settings
 from shared.models import Chunk
@@ -111,7 +111,11 @@ def write_document(
     # 2. Qdrant: delete old points for this doc, upsert new
     qdrant.delete(
         collection_name=settings.qdrant_collection,
-        points_selector={"filter": {"must": [{"key": "doc_id", "match": {"value": doc_id}}]}},
+        points_selector=FilterSelector(
+            filter=Filter(
+                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+            )
+        ),
     )
 
     points = [
@@ -162,7 +166,11 @@ def delete_document(
 
     qdrant.delete(
         collection_name=settings.qdrant_collection,
-        points_selector={"filter": {"must": [{"key": "doc_id", "match": {"value": doc_id}}]}},
+        points_selector=FilterSelector(
+            filter=Filter(
+                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
+            )
+        ),
     )
 
     try:

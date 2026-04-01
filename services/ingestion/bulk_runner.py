@@ -15,6 +15,8 @@ import time
 import uuid
 from pathlib import Path
 
+from services.ingestion.chunker import _make_id
+
 from shared.config import settings
 from shared.db import get_minio, get_pg_conn, get_qdrant, init_minio, init_qdrant
 from services.ingestion.chunker import chunk_sections
@@ -102,7 +104,7 @@ def run(doc_dir: Path) -> None:
 
     # 2. DELETE removed docs
     for rel_path in deleted_paths:
-        doc_id = hashlib.sha256(rel_path.encode()).hexdigest()[:16]
+        doc_id = _make_id(rel_path)
         try:
             delete_document(doc_id, rel_path, conn, qdrant, minio_client)
         except Exception as e:
@@ -130,7 +132,7 @@ def run(doc_dir: Path) -> None:
                     language=language,
                 )
                 raw_content = abs_path.read_text(encoding="utf-8", errors="replace")
-                doc_id = hashlib.sha256(rel_path.encode()).hexdigest()[:16]
+                doc_id = _make_id(rel_path)
 
                 batch_chunks.append(
                     (rel_path, raw_content, doc_id, doc_type, language, {}, chunks)
