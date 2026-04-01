@@ -47,7 +47,7 @@ def _build_messages(query: str, chunks: list[RetrievalResult]) -> list[dict]:
         {"role": "system", "content": _get_system_prompt()},
         {
             "role": "user",
-            "content": f"Context:\n{context}\n\nQuestion: {query}",
+            "content": f"/nothink\nContext:\n{context}\n\nQuestion: {query}",
         },
     ]
 
@@ -56,7 +56,7 @@ def generate(query: str, chunks: list[RetrievalResult]) -> str:
     """Generate a full response from Ollama (non-streaming)."""
     messages = _build_messages(query, chunks)
 
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
         resp = client.post(
             f"{settings.ollama_url}/api/chat",
             json={

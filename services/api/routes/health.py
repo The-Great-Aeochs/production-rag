@@ -2,6 +2,7 @@
 
 import httpx
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from shared.config import settings
 
@@ -19,7 +20,7 @@ def health_check(request: Request):
     all_critical = checks["qdrant"] and checks["postgres"]
     status = "healthy" if all_critical else "unhealthy"
     code = 200 if all_critical else 503
-    return {"status": status, "checks": checks}, code
+    return JSONResponse({"status": status, "checks": checks}, status_code=code)
 
 
 def _ping_qdrant(client) -> bool:
