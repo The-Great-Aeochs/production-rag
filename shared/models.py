@@ -39,10 +39,19 @@ class Chunk(BaseModel):
     embedding: list[float] | None = None
 
 
+class ConversationMessage(BaseModel):
+    """A single message in a conversation session."""
+
+    role: str  # "user" | "assistant"
+    content: str
+    token_count: int = 0
+
+
 class QueryRequest(BaseModel):
     """Input to the query pipeline."""
 
     query: str
+    session_id: str | None = None  # None = single-turn (no history)
     filters: dict | None = None
     top_k: int = 5
     use_cache: bool = True
@@ -66,6 +75,7 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list[RetrievalResult] = Field(default_factory=list)
     cached: bool = False
+    session_id: str | None = None
     latency_ms: dict = Field(default_factory=dict)
     model_used: str = ""
     prompt_version: str = ""

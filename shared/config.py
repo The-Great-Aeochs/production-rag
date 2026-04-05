@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL"
 
+    # Session / multi-turn
+    session_ttl: int = 7200  # 2 hours
+    session_max_history: int = 10  # max verbatim messages (5 exchanges)
+    session_summary_token_threshold: int = 1500  # summarize when history exceeds this
+
     # Embedding
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     embedding_dim: int = 768

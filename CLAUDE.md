@@ -45,7 +45,7 @@ production-rag/
 │   ├── api/                            # FastAPI gateway
 │   │   ├── Dockerfile
 │   │   ├── main.py
-│   │   ├── routes/                     # query.py, ingest.py, admin.py
+│   │   ├── routes/                     # query.py, ingest.py, health.py, admin.py
 │   │   └── middleware/                 # auth.py, rate_limit.py
 │   ├── ingestion/                      # Ingestion pipeline
 │   │   ├── Dockerfile
@@ -56,11 +56,13 @@ production-rag/
 │   │   └── bulk_runner.py              # Parallel bulk ingestion orchestrator
 │   ├── query/                          # Query pipeline
 │   │   ├── Dockerfile
-│   │   ├── rewriter.py
+│   │   ├── session.py                  # Redis session manager (multi-turn history)
+│   │   ├── rewriter.py                 # Context-aware query rewriting
 │   │   ├── retriever.py                # Hybrid: Qdrant + Postgres BM25
 │   │   ├── reranker.py                 # Cross-encoder: ms-marco-MiniLM-L-6-v2
-│   │   ├── generator.py                # LLM with citations
-│   │   └── cache.py                    # Redis semantic cache
+│   │   ├── generator.py                # LLM with citations + conversation history
+│   │   ├── cache.py                    # Redis semantic cache
+│   │   └── pipeline.py                 # Query pipeline orchestrator
 │   └── eval/                           # Evaluation service
 │       ├── eval_runner.py
 │       ├── test_sets/v1.json
@@ -74,7 +76,7 @@ production-rag/
 │   └── run_eval.py                     # Run eval suite
 ├── prompts/
 │   ├── system_v1.txt                   # Versioned system prompts
-│   └── query_rewrite_v1.txt
+│   └── query_rewrite_v1.txt            # Query rewrite prompt for multi-turn
 └── documents/                          # Drop raw docs here for ingestion
 ```
 
@@ -110,10 +112,18 @@ class Chunk:
     metadata: dict
     embedding: list[float] | None # filled by embedder, 768 dims
 
+# --- Conversation models (multi-turn) ---
+
+class ConversationMessage:
+    role: str                     # "user" | "assistant"
+    content: str
+    token_count: int = 0
+
 # --- Query models ---
 
 class QueryRequest:
     query: str
+    session_id: str | None        # None = single-turn, set for multi-turn conversations
     filters: dict | None          # e.g. {"repo": "myapp", "doc_type": "code", "language": "python"}
     top_k: int = 5
     use_cache: bool = True
@@ -131,7 +141,8 @@ class QueryResponse:
     answer: str
     sources: list[RetrievalResult]
     cached: bool
-    latency_ms: dict              # {"retrieval": 120, "rerank": 45, "generation": 800, "total": 985}
+    session_id: str | None        # echoed back for client session tracking
+    latency_ms: dict              # {"session_load": 1, "rewrite": 200, "retrieval": 120, ...}
     model_used: str
     prompt_version: str
 
@@ -361,7 +372,8 @@ redis.hset(f"ingest:{job_id}", mapping={
 
 ```
 Total query budget:         4000ms (P95 target)
-├── Query rewrite:           200ms  (skip if timeout pressure)
+├── Session load (Redis):     5ms  (< 1ms typical)
+├── Query rewrite:           200ms  (skip if first turn or self-contained)
 ├── Retrieval (parallel):   1000ms
 │   ├── Qdrant semantic:     500ms
 │   └── Postgres BM25:       500ms
@@ -464,6 +476,107 @@ async def health_check():
 
 ---
 
+## Multi-Turn Conversation Design
+
+The system supports multi-turn conversations via session-based short-term memory and context-aware query rewriting.
+
+### Architecture
+
+```
+User sends query + session_id
+    |
+    v
+[1] Load session from Redis              — < 1ms
+    (rolling summary + last N messages)
+    |
+    v
+[2] Query rewriting (LLM call)           — variable (skip if first turn)
+    "What about its performance?"
+    → "What is the performance of the chunker when processing large files?"
+    |
+    v
+[3] Existing pipeline (embed → retrieve → rerank → generate)
+    Uses REWRITTEN query for retrieval
+    Passes conversation history to LLM for coherent responses
+    |
+    v
+[4] Save user + assistant messages to session (Redis)
+```
+
+### Short-Term Memory (Redis Sessions)
+
+```
+# Key structure:
+session:{session_id}:messages     → List of JSON messages
+session:{session_id}:meta         → Hash: created_at, last_active, message_count
+session:{session_id}:summary      → String: rolling conversation summary
+
+# TTL: 2 hours (configurable via SESSION_TTL)
+# Max verbatim history: 10 messages / 5 exchanges (configurable via SESSION_MAX_HISTORY)
+```
+
+- Both user AND assistant messages are stored (needed for coreference resolution)
+- Token counts tracked per message at write time
+- When history exceeds `SESSION_SUMMARY_TOKEN_THRESHOLD` (1500 tokens), older messages can be summarized into a rolling summary (Phase 3+)
+- Session auto-expires after TTL — no cleanup needed
+
+### Query Rewriting
+
+The rewriter resolves coreference, ellipsis, and implicit references using conversation history:
+
+```
+# Cases handled:
+- Pronoun references:     "What about it?"  → resolves "it" from history
+- Demonstrative refs:     "that function"   → resolves to specific function name
+- Ellipsis:               "And for Python?" → expands with prior topic context
+- Topic continuation:     "Tell me more"    → repeats topic from prior turn
+- Self-contained queries: passed through unchanged (no LLM call)
+```
+
+**Heuristic skip:** If the query has no pronouns/demonstratives and is reasonably long, skip the LLM rewrite call entirely (saves latency on first turn and self-contained follow-ups).
+
+**Graceful degradation:** If rewriting fails or times out, the raw query is used. The pipeline never blocks on rewrite failure.
+
+### API Flow
+
+```
+# Single-turn (no session):
+POST /query {"query": "how does the chunker work?"}
+→ Normal RAG pipeline, no session overhead
+
+# Multi-turn:
+POST /session
+→ {"session_id": "a1b2c3d4e5f6g7h8"}
+
+POST /query {"query": "how does the chunker work?", "session_id": "a1b2c3d4e5f6g7h8"}
+→ First turn: no rewrite needed, saves messages to session
+
+POST /query {"query": "what about its performance?", "session_id": "a1b2c3d4e5f6g7h8"}
+→ Rewrites to: "what is the performance of the chunker?"
+→ Retrieves chunks about chunker performance
+→ LLM sees conversation history for coherent response
+```
+
+### Token Budget (multi-turn, ~8K context)
+
+| Component | Tokens | Priority |
+|-----------|--------|----------|
+| System prompt | ~500 | 1 (never truncate) |
+| Conversation summary | ~500 | 5 |
+| Recent history (verbatim) | ~1,500 | 4 |
+| Retrieved chunks | ~3,500 | 3 |
+| Current query + generation | ~2,000 | 2 |
+
+### Long-Term Memory (Phase 5 — requires user identity)
+
+Not yet implemented. Future design:
+- Postgres `user_memory` table for structured facts (preferences, expertise level)
+- Qdrant `user_memory` collection for semantic search over past session summaries
+- End-of-session extraction: LLM summarizes session → extracts durable facts
+- In-session extraction: explicit preference statements saved immediately
+
+---
+
 ## Document Update & Deletion
 
 Technical docs change constantly. The system handles this via content hashing:
@@ -538,16 +651,15 @@ RATE_LIMITS = {
 - **Milestone:** 1000 files indexed, verified via Qdrant UI nearest-neighbor query. Bulk re-run skips unchanged files.
 
 ### Phase 2 — Query Pipeline
-- FastAPI endpoints: `POST /query`, `POST /query/stream`, `GET /health`, etc.
+- FastAPI endpoints: `POST /query`, `POST /query/stream`, `GET /health`, `POST /session`
 - Hybrid retrieval: Qdrant (top-30 semantic) + Postgres BM25 (top-30 keyword) → RRF merge
 - Reranker: cross-encoder/ms-marco-MiniLM-L-6-v2, top-30 → top-5
 - LLM generation with citation instructions, streaming
-- Redis semantic cache (hash rounded embeddings, 1h/24h TTL)
+- Redis semantic cache (hash rounded embeddings, 1h TTL)
+- Multi-turn conversations: Redis session store, context-aware query rewriting, conversation history in LLM prompt
 - Timeout budgets per pipeline stage, graceful degradation
-- Circuit breakers on Qdrant, Postgres, reranker
-- Rate limiting middleware
 - Per-query logging to query_logs table
-- **Milestone:** Questions answered with citations. Graceful fallback when services are slow. Latency breakdown visible per query.
+- **Milestone:** Questions answered with citations. Multi-turn follow-ups resolve references correctly. Cache hits on repeated queries. Latency breakdown visible per query.
 
 ### Phase 3 — Quality + Eval
 - 50-100 Q&A test pairs, RAGAS or custom eval harness
@@ -568,6 +680,8 @@ RATE_LIMITS = {
 
 ### Phase 5 — Advanced (when needed)
 - Multi-tenancy (per-tenant Qdrant collections, Postgres RLS)
+- Long-term memory: Postgres `user_memory` table + Qdrant `user_memory` collection for cross-session persistence
+- Session summarization: rolling summary when history exceeds token threshold, end-of-session fact extraction
 - Streaming ingestion (Git webhooks → auto re-ingest on push)
 - Embedding model upgrades (dual-write to v1 + v2 collection, switch, delete v1)
 - Model routing (cheap/fast vs expensive/quality based on query complexity)
@@ -633,6 +747,9 @@ RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 CHUNK_MIN_TOKENS=256
 CHUNK_MAX_TOKENS=1024
 CHUNK_OVERLAP_RATIO=0.1
+SESSION_TTL=7200
+SESSION_MAX_HISTORY=10
+SESSION_SUMMARY_TOKEN_THRESHOLD=1500
 ```
 
 ## Git Conventions

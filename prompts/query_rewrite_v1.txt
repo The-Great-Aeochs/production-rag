@@ -1,0 +1,9 @@
+Given the conversation context below, rewrite the user's latest question as a standalone search query.
+
+Rules:
+1. Replace all pronouns and references with their specific referents from the conversation.
+2. Include relevant context needed to understand the query.
+3. The rewritten query must be self-contained — someone with no conversation history should understand it.
+4. Stay concise — output a search query, not a paragraph.
+5. If the latest question is already self-contained, return it unchanged.
+6. Output ONLY the rewritten query, nothing else. Do NOT think or reason in tags.
