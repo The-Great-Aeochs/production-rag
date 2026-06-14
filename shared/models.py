@@ -81,6 +81,40 @@ class QueryResponse(BaseModel):
     prompt_version: str = ""
 
 
+class EvalCase(BaseModel):
+    """A single test case for RAG evaluation."""
+
+    id: str
+    question: str
+    expected_answer: str
+    expected_sources: list[str] = Field(default_factory=list)  # file paths
+    tags: list[str] = Field(default_factory=list)
+    category: str = "factual"  # factual | code_search | conceptual | multi_hop | negative | ambiguous
+    difficulty: str = "medium"  # easy | medium | hard
+    expected_behavior: str = "answer"  # answer | refuse | clarify
+    filters: dict | None = None
+
+
+class EvalResult(BaseModel):
+    """Result of evaluating a single test case."""
+
+    case_id: str
+    # Retrieval metrics
+    hit: bool = False
+    reciprocal_rank: float = 0.0
+    precision_at_k: float = 0.0
+    retrieved_sources: list[str] = Field(default_factory=list)
+    # Generation metrics
+    answer: str = ""
+    faithfulness: float | None = None
+    relevancy: int | None = None  # 1-3 scale
+    correctness: int | None = None  # 1-3 scale
+    citation_accuracy: float | None = None
+    # Latency
+    latency_ms: float = 0.0
+    latency_breakdown: dict = Field(default_factory=dict)
+
+
 class IngestionJob(BaseModel):
     """Tracks a bulk ingestion run."""
 

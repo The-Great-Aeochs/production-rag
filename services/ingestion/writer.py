@@ -160,7 +160,12 @@ def delete_document(
     qdrant: QdrantClient,
     minio_client: Minio,
 ) -> None:
-    """Remove a document and all its chunks from all stores."""
+    """Remove a document and all its chunks from all stores.
+
+    Postgres delete is transactional (chunks cascade); the Qdrant and MinIO
+    deletes are best-effort afterwards. If one of those fails, the bulk runner
+    logs it and a subsequent re-run reconciles the orphan by doc_id.
+    """
     with conn.transaction():
         conn.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
 

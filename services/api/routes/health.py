@@ -13,7 +13,7 @@ router = APIRouter(tags=["health"])
 def health_check(request: Request):
     checks = {
         "qdrant": _ping_qdrant(request.app.state.qdrant),
-        "postgres": _ping_postgres(request.app.state.pg_conn),
+        "postgres": _ping_postgres(request.app.state.pg_pool),
         "redis": _ping_redis(request.app.state.redis),
         "ollama": _ping_ollama(),
     }
@@ -31,9 +31,10 @@ def _ping_qdrant(client) -> bool:
         return False
 
 
-def _ping_postgres(conn) -> bool:
+def _ping_postgres(pool) -> bool:
     try:
-        conn.execute("SELECT 1")
+        with pool.connection() as conn:
+            conn.execute("SELECT 1")
         return True
     except Exception:
         return False

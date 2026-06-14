@@ -6,13 +6,18 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+from shared.config import settings
 from shared.models import ConversationMessage, QueryRequest, QueryResponse
-from services.ingestion.embedder import embed_batch
-from services.query.cache import get_cached
-from services.query.generator import generate_stream
-from services.query.pipeline import run_query
-from services.query.reranker import rerank
-from services.query.retriever import keyword_search, reciprocal_rank_fusion, semantic_search
+from services.ingestion.embedder import embed_query
+from services.query.generator import PROMPT_VERSION, generate_stream
+from services.query.pipeline import (
+    _count_tokens_approx,
+    _safe_cache_get,
+    _safe_cache_set,
+    _safe_log_query,
+    retrieve_and_rerank,
+    run_query,
+)
 from services.query.rewriter import rewrite_query
 from services.query.session import (
     add_message,
@@ -42,7 +47,7 @@ def query_endpoint(req: QueryRequest, request: Request):
     """
     return run_query(
         req,
-        conn=request.app.state.pg_conn,
+        pool=request.app.state.pg_pool,
         qdrant=request.app.state.qdrant,
         redis_client=request.app.state.redis,
     )
@@ -51,7 +56,7 @@ def query_endpoint(req: QueryRequest, request: Request):
 @router.post("/query/stream")
 async def query_stream_endpoint(req: QueryRequest, request: Request):
     """Streaming RAG pipeline via Server-Sent Events."""
-    conn = request.app.state.pg_conn
+    pool = request.app.state.pg_pool
     qdrant = request.app.state.qdrant
     redis_client = request.app.state.redis
 
@@ -76,33 +81,30 @@ async def query_stream_endpoint(req: QueryRequest, request: Request):
         add_message(session_id, ConversationMessage(
             role="user",
             content=req.query,
-            token_count=len(req.query) // 4,
+            token_count=_count_tokens_approx(req.query),
         ), redis_client)
 
-    # Embed + retrieve + rerank using (possibly rewritten) query
-    query_embedding = embed_batch([search_query])[0]
+    # Embed (possibly rewritten) query
+    query_embedding = embed_query(search_query)
 
+    # Cache check (keyed on rewritten query text)
     if req.use_cache:
-        cached = None
-        try:
-            cached = get_cached(query_embedding, redis_client)
-        except Exception:
-            pass
+        cached = _safe_cache_get(search_query, redis_client)
         if cached is not None:
             if session_id:
                 add_message(session_id, ConversationMessage(
                     role="assistant",
                     content=cached.answer,
-                    token_count=len(cached.answer) // 4,
+                    token_count=_count_tokens_approx(cached.answer),
                 ), redis_client)
             async def _cached():
                 yield f"data: {json.dumps({'token': cached.answer, 'done': True, 'session_id': session_id})}\n\n"
             return StreamingResponse(_cached(), media_type="text/event-stream")
 
-    semantic_results = semantic_search(query_embedding, qdrant, req.filters)
-    keyword_results = keyword_search(search_query, conn, req.filters)
-    merged = reciprocal_rank_fusion(semantic_results, keyword_results)
-    top_chunks = rerank(search_query, merged, req.top_k)
+    # Shared parallel retrieval + rerank
+    top_chunks = retrieve_and_rerank(
+        search_query, query_embedding, pool, qdrant, req.filters, req.top_k
+    )
 
     if not top_chunks:
         async def _empty():
@@ -122,14 +124,27 @@ async def query_stream_endpoint(req: QueryRequest, request: Request):
             full_answer.append(token)
             yield f"data: {json.dumps({'token': token})}\n\n"
 
+        answer_text = "".join(full_answer)
+
         # Save assistant response to session
         if session_id:
-            answer_text = "".join(full_answer)
             add_message(session_id, ConversationMessage(
                 role="assistant",
                 content=answer_text,
-                token_count=len(answer_text) // 4,
+                token_count=_count_tokens_approx(answer_text),
             ), redis_client)
+
+        # Cache + log, parity with the blocking pipeline (best-effort)
+        response = QueryResponse(
+            answer=answer_text,
+            sources=top_chunks,
+            cached=False,
+            session_id=session_id,
+            model_used=settings.ollama_model,
+            prompt_version=PROMPT_VERSION,
+        )
+        _safe_cache_set(search_query, response, redis_client)
+        _safe_log_query(req, top_chunks, response, pool)
 
         yield f"data: {json.dumps({'done': True})}\n\n"
 

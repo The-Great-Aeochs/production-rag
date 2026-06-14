@@ -38,3 +38,8 @@ def rerank(
     ]
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored[:top_k]
+
+
+def warmup() -> None:
+    """Load the cross-encoder so the first request isn't slow."""
+    _get_model().predict([("warmup query", "warmup document")], show_progress_bar=False)
