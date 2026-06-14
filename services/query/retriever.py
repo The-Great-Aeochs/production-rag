@@ -23,21 +23,35 @@ def semantic_search(
     top_k: int = 30,
 ) -> list[RetrievalResult]:
     """Vector similarity search in Qdrant."""
+    from qdrant_client.models import (
+        FieldCondition,
+        Filter,
+        MatchValue,
+        QuantizationSearchParams,
+        SearchParams,
+    )
+
     query_filter = None
     if filters:
-        from qdrant_client.models import FieldCondition, Filter, MatchValue
-
         conditions = [
             FieldCondition(key=k, match=MatchValue(value=v))
             for k, v in filters.items()
         ]
         query_filter = Filter(must=conditions)
 
+    # The collection stores INT8-quantized vectors. Rescore the top candidates
+    # against the full-precision vectors to recover the recall lost to
+    # quantization (oversampling fetches extra candidates before rescoring).
+    search_params = SearchParams(
+        quantization=QuantizationSearchParams(rescore=True, oversampling=2.0)
+    )
+
     results = qdrant.query_points(
         collection_name=settings.qdrant_collection,
         query=query_embedding,
         query_filter=query_filter,
         limit=top_k,
+        search_params=search_params,
     )
 
     return [

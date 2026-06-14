@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     pg_user: str = "raguser"
     pg_password: str = "ragpass123"
     pg_db: str = "ragdb"
+    pg_pool_min_size: int = 2
+    pg_pool_max_size: int = 10
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
@@ -26,6 +28,15 @@ class Settings(BaseSettings):
     # Ollama
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL"
+
+    # Anthropic (Claude API upgrade path — eval judge, optional generator backend)
+    # The anthropic SDK also reads ANTHROPIC_API_KEY directly from the environment;
+    # this field just makes the setting explicit/overridable.
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-opus-4-8"
+
+    # Retrieval timeouts (graceful degradation — see pipeline.py)
+    retrieval_timeout_s: float = 1.0  # per leg (semantic / keyword), runs in parallel
 
     # Session / multi-turn
     session_ttl: int = 7200  # 2 hours
