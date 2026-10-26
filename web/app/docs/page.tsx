@@ -1,20 +1,14 @@
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { repository } from "@/lib/samples";
-export const metadata = { title: "How it works" };
+export const metadata = { title: "Documentation" };
 export default function Docs() {
   return (
     <main id="main" className="page-shell docs-page">
-      <p className="eyebrow">A FIELD GUIDE</p>
-      <h1>
-        From a document
-        <br />
-        <em>to a grounded answer.</em>
-      </h1>
+      <h1>Documentation</h1>
       <p>
-        Production RAG is an engineering project that makes the retrieval
-        pipeline explicit. Its source, tests, and deployment instructions are
-        available in the repository.
+        How documents are indexed, searched, and restricted to the right
+        workspace.
       </p>
       <a
         href={`${repository}/tree/main/docs`}
@@ -78,10 +72,10 @@ export default function Docs() {
       </p>
       <h2>What the public demo does</h2>
       <p>
-        Guided examples are prewritten walkthroughs and are labeled that way.
-        When live inference is connected, public questions use only a dedicated
-        sample corpus, with global per-minute and per-day limits. The public
-        demo has no private workspace sessions.
+        Sample answers are prewritten and are labeled that way. When live
+        inference is connected, public questions use only a dedicated sample
+        corpus, with global per-minute and per-day limits. The public demo has
+        no private workspace sessions.
       </p>
       <h2>Deploy the website</h2>
       <p>
@@ -106,7 +100,7 @@ export default function Docs() {
         . Never expose the backend admin key to a browser.
       </p>
       <Link className="button primary" href="/#demo">
-        Back to the playground
+        Back to the demo
       </Link>
     </main>
   );

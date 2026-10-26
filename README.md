@@ -11,7 +11,7 @@ representative corpus and deployment hardware.
 
 ## Website and workspace RBAC
 
-`web/` contains a Next.js showcase, guided examples, optional capped live demo,
+`web/` contains a Next.js showcase, sample answers, optional capped live demo,
 and Clerk-authenticated workspace dashboard. Database memberships enforce
 member, editor, and admin permissions on the API, with an access audit trail.
 
@@ -26,6 +26,7 @@ Use Node.js 24. Empty credentials serve the showcase and prewritten examples;
 private workspaces require configured login and a running backend. For Vercel,
 set Root Directory to `web`. See [website deployment and RBAC](docs/website.md)
 for Clerk setup, migration, roles, source connections, demo quotas, and costs.
+[UI design notes](docs/ui-design.md) explain the interface and frontend structure.
 
 ## Architecture
 

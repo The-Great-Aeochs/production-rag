@@ -25,7 +25,7 @@ verify the frontend. Dependencies are pinned in `package-lock.json`.
 1. Import this GitHub repository into your Vercel account.
 2. Set **Root Directory** to `web`, framework to Next.js, and Node.js to 24.x.
    The checked-in `web/vercel.json` uses `npm ci` and `npm run build`.
-3. Deploy without credentials first to publish the showcase and guided examples.
+3. Deploy without credentials first to publish the showcase and sample answers.
 4. Add the login/backend variables below, then redeploy to enable workspaces.
    `NEXT_PUBLIC_` values are embedded at build time.
 5. Configure a stable production domain and the corresponding Clerk allowed
@@ -170,7 +170,7 @@ replicas. Quota-store failures deny live calls. Quotas use UTC minute/day
 windows and count admitted attempts, including cache hits and failed model
 calls; they limit calls, not a guaranteed dollar spend. Configure provider
 spending limits, edge request limits, and alerts before advertising the live
-demo broadly. Guided examples remain available when live inference is disabled
+demo broadly. Sample answers remain available when live inference is disabled
 or a quota is exhausted.
 
 ## Launch verification

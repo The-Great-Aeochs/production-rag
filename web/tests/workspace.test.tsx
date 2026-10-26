@@ -52,7 +52,9 @@ describe("workspace interface", () => {
     render(<WorkspaceApp />);
     await screen.findByRole("heading", { name: "Design handbook" });
     fireEvent.click(screen.getByRole("button", { name: "Members" }));
-    expect(await screen.findByText(/People & permissions/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Members" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByLabelText("Add a teammate by workspace user ID"),
     ).toBeInTheDocument();
@@ -90,7 +92,7 @@ it("clears and cancels the old conversation when switching workspaces", async ()
     target: { value: "Engineering-only question" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Send question" }));
-  await screen.findByText("Looking for supporting context…");
+  await screen.findByText("Searching documents…");
   // Wait for the streaming request to start after session creation.
   const { waitFor } = await import("@testing-library/react");
   await waitFor(() => expect(activeSignal).toBeDefined());

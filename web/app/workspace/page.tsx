@@ -9,20 +9,15 @@ export default async function Workspace() {
   if (!loginConfigured())
     return (
       <main id="main" className="page-shell">
-        <p className="eyebrow">YOUR OWN CONTEXT</p>
-        <h1>
-          A place for your
-          <br />
-          <em>team’s knowledge.</em>
-        </h1>
+        <h1>Workspaces</h1>
         <div className="notice-panel">
-          <h2>Workspace sign-in is coming online.</h2>
+          <h2>Workspace login is unavailable</h2>
           <p>
-            Login isn’t configured on this deployment yet. You can still explore
-            the public playground and see how the system works.
+            Login has not been configured for this deployment. Browse the public
+            demo to see example answers and sources.
           </p>
           <Link href="/#demo" className="button primary">
-            Explore the playground <ArrowRight size={15} />
+            View the demo <ArrowRight size={15} aria-hidden="true" />
           </Link>
         </div>
       </main>
