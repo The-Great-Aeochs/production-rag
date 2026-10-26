@@ -106,3 +106,14 @@ production build, TypeScript, formatting, frontend tests, and dependency audit.
 
 See [the operations guide](docs/production.md) for migrations, rollout, recovery,
 load measurement, evaluation, and remaining production decisions.
+
+## Maintenance workflow
+
+Development uses the `main` branch. Run the required checks before pushing;
+GitHub CI also validates every push. Create a branch or PR only when explicitly
+requested.
+
+Automatic dependency-update PRs are disabled to avoid creating extra branches.
+Dependency security alerts remain enabled. Apply dependency changes explicitly,
+update `uv.lock` or `web/package-lock.json` with them, and verify the full test
+suite before pushing. Python updates must remain within the supported range.

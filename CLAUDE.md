@@ -97,7 +97,11 @@ refactors. Keep shared request handling and types outside presentation views.
 - `docs/production.md`: rollout, backups, recovery, load, and evaluation.
 - `docs/website.md`: Vercel, Clerk, source connections, demo limits, and RBAC.
 - `docs/ui-design.md`: design decisions and frontend organization.
-- Use descriptive branches and `feat:`, `fix:`, `refactor:`, `eval:`, `infra:`, or
-  `docs:` commit prefixes. Keep validation and deployment limits in PR descriptions.
+- Work directly on `main` and push only after all required checks pass. Create
+  another branch or PR only when the user explicitly requests one. Use `feat:`,
+  `fix:`, `refactor:`, `eval:`, `infra:`, or `docs:` commit prefixes.
+- Automatic dependency-update PRs are disabled to keep a single branch. Apply
+  dependency updates explicitly, regenerate the appropriate lockfile, and test
+  before pushing. Keep repository vulnerability alerts enabled.
 - Tag explicit phase milestones using the existing `v0.1.0-phase1` pattern;
   routine cleanup is not a phase release.
