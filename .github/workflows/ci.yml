@@ -52,4 +52,25 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker build --tag production-rag:ci .
-      - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from sentence_transformers import SentenceTransformer, CrossEncoder; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("002_recoverable_ingestion.sql").is_file()'
+      - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from sentence_transformers import SentenceTransformer, CrossEncoder; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("003_workspaces.sql").is_file()'
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run build

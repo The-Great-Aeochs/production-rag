@@ -9,6 +9,8 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from shared.config import settings
+from shared.identity import Identity, verify_identity
+from shared.rbac import membership
 
 _bearer = HTTPBearer(auto_error=False)
 _RATE_LIMIT = """
@@ -22,6 +24,8 @@ return n
 class Principal:
     owner: str
     corpus_id: str
+    user_id: str | None = None
+    role: str = "member"
 
 
 def _token(credentials: HTTPAuthorizationCredentials | None) -> str:
@@ -51,8 +55,23 @@ def rate_limit(request: Request, owner: str) -> None:
 def require_principal(
     request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)]
 ) -> Principal:
-    principal = authenticate(_token(credentials))
-    rate_limit(request, principal.owner)
+    token = _token(credentials)
+    if token in settings.api_keys:
+        principal = authenticate(token)
+    elif settings.jwt_issuer:
+        identity = verify_identity(token)
+        corpus = request.headers.get("X-Workspace-ID", "")
+        import re
+
+        if not re.fullmatch(r"ws_[a-f0-9]{32}", corpus):
+            raise HTTPException(400, "Choose a workspace")
+        with request.app.state.pg_pool.connection() as conn:
+            role, version = membership(conn, corpus, identity.user_id)
+        owner = hashlib.sha256(f"{identity.user_id}:{corpus}:{version}".encode()).hexdigest()
+        principal = Principal(owner, corpus, identity.user_id, role)
+    else:
+        principal = authenticate(token)
+    rate_limit(request, principal.user_id or principal.owner)
     return principal
 
 
@@ -66,3 +85,11 @@ def require_admin(
     if not secrets.compare_digest(token.encode(), key.get_secret_value().encode()):
         raise HTTPException(403, "Admin token required")
     rate_limit(request, "admin")
+
+
+def require_identity(
+    request: Request, credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)]
+) -> Identity:
+    identity = verify_identity(_token(credentials))
+    rate_limit(request, identity.user_id)
+    return identity

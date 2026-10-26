@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     # Bearer token -> corpus. Each token owns its own sessions and cache namespace.
     api_keys: dict[str, str] = Field(default_factory=dict, repr=False)
     admin_api_key: SecretStr | None = None
+    jwt_issuer: str | None = None
+    jwt_audience: str | None = None
+    jwt_authorized_parties: list[str] = Field(default_factory=list)
+    max_workspaces_per_user: int = Field(default=3, ge=1, le=100)
+    demo_enabled: bool = False
+    demo_proxy_secret: SecretStr | None = None
+    demo_corpus_id: str = "public-demo"
+    demo_queries_per_minute: int = Field(default=5, ge=1, le=60)
+    demo_queries_per_day: int = Field(default=50, ge=1, le=10000)
     ingest_root: Path = Path("./documents")
     corpus_id: str = "default"
     requests_per_minute: int = Field(default=60, ge=1)
@@ -76,7 +85,7 @@ class Settings(BaseSettings):
             raise ValueError("PG_POOL_MIN_SIZE must not exceed PG_POOL_MAX_SIZE")
         if self.chunk_min_tokens > self.chunk_max_tokens:
             raise ValueError("CHUNK_MIN_TOKENS must not exceed CHUNK_MAX_TOKENS")
-        for corpus in [self.corpus_id, *self.api_keys.values()]:
+        for corpus in [self.corpus_id, self.demo_corpus_id, *self.api_keys.values()]:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", corpus):
                 raise ValueError("Corpus IDs must be 1-64 letters, digits, underscores, or hyphens")
         tokens = list(self.api_keys)
@@ -86,9 +95,35 @@ class Settings(BaseSettings):
             raise ValueError("API tokens must contain at least 32 characters")
         if self.admin_api_key and self.admin_api_key.get_secret_value() in self.api_keys:
             raise ValueError("Admin and query API tokens must differ")
+        if bool(self.jwt_issuer) != bool(self.jwt_audience):
+            raise ValueError("JWT_ISSUER and JWT_AUDIENCE must be configured together")
+        if self.jwt_issuer:
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(self.jwt_issuer)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.query
+                or parsed.fragment
+                or parsed.username
+            ):
+                raise ValueError("JWT_ISSUER must be a trusted HTTPS issuer URL")
+        if self.demo_proxy_secret and self.demo_proxy_secret.get_secret_value() in tokens:
+            raise ValueError("DEMO_PROXY_SECRET must differ from privileged API keys")
+        if self.demo_enabled and not self.demo_corpus_id.startswith("public-"):
+            raise ValueError("The demo must use a dedicated public- corpus")
+        if self.demo_enabled and (
+            not self.demo_proxy_secret or len(self.demo_proxy_secret.get_secret_value()) < 32
+        ):
+            raise ValueError(
+                "The public demo requires a separate DEMO_PROXY_SECRET of at least 32 characters"
+            )
         if self.environment == "production":
-            if not self.api_keys or not self.admin_api_key:
-                raise ValueError("Production requires API_KEYS and ADMIN_API_KEY")
+            if not (self.api_keys or self.jwt_issuer) or not self.admin_api_key:
+                raise ValueError(
+                    "Production requires API_KEYS or JWT configuration, and ADMIN_API_KEY"
+                )
             if not self.pg_password or not self.minio_root_user or not self.minio_root_password:
                 raise ValueError(
                     "Production requires explicit database and object-store credentials"

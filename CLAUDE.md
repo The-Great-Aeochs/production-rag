@@ -3,7 +3,13 @@
 ## Current production foundation
 
 The executable code and README supersede the historical design sketches below.
-Authentication maps bearer tokens to corpora; session ownership is token-scoped.
+Service keys map to corpora. Managed login verifies configured RS256 issuer,
+audience, expiry, and subject; Postgres workspace memberships grant member,
+editor, or admin permissions. Ignore browser role claims. Membership versions
+scope user sessions and caches; platform admin secrets remain separate.
+`web/` is a separately deployed Next.js showcase and workspace app; its server
+gateway forwards verified login tokens. Public inference is opt-in, uses a
+dedicated public corpus, and enforces global Redis quotas. See docs/website.md.
 Postgres owns the durable ingestion queue and corpus advisory locks. Pending or
 deleting documents are hidden from both retrieval backends until publication
 completes. Cache keys include authorization scope, filters, versions and corpus

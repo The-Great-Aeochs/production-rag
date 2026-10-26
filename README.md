@@ -9,6 +9,24 @@ durable ingestion, recoverable document publication, and automated regression
 checks. Capacity, quality, and availability must still be validated on your
 representative corpus and deployment hardware.
 
+## Website and workspace RBAC
+
+`web/` contains a Next.js showcase, guided examples, optional capped live demo,
+and Clerk-authenticated workspace dashboard. Database memberships enforce
+member, editor, and admin permissions on the API, with an access audit trail.
+
+```bash
+cd web
+cp .env.example .env.local
+npm ci
+npm run dev
+```
+
+Use Node.js 24. Empty credentials serve the showcase and prewritten examples;
+private workspaces require configured login and a running backend. For Vercel,
+set Root Directory to `web`. See [website deployment and RBAC](docs/website.md)
+for Clerk setup, migration, roles, source connections, demo quotas, and costs.
+
 ## Architecture
 
 ```text
@@ -82,7 +100,8 @@ TEST_DATABASE_URL=postgresql://user:password@localhost/testdb uv run --extra dev
 Tests create isolated schemas. Use a disposable database. Postgres integration
 covers retries, partial publication, tombstones, corpus isolation, and worker
 locks; Qdrant local mode and an injectable S3 fake cover retrieval and faults.
-CI runs Python 3.11–3.13 and builds the runtime container.
+CI runs Python 3.11–3.13, builds the runtime container, and checks the Next.js
+production build, TypeScript, formatting, frontend tests, and dependency audit.
 
 See [the operations guide](docs/production.md) for migrations, rollout, recovery,
 load measurement, evaluation, and remaining production decisions.

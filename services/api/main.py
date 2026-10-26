@@ -10,10 +10,11 @@ from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout, TooManyRequests
 
 from services.api.middleware import RequestMiddleware
-from services.api.routes import health, ingest, query
+from services.api.routes import demo, health, ingest, query, workspaces
 from services.ingestion import embedder
 from services.query import reranker
 from shared.db import get_pg_pool, get_qdrant, get_redis_client
+from shared.schema import SCHEMA_VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -32,7 +33,7 @@ async def _lifespan(app: FastAPI):
         # Fail early on schema drift; never mutate schema in an API replica.
         with app.state.pg_pool.connection() as conn:
             if not conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version='002_recoverable_ingestion'"
+                "SELECT 1 FROM schema_migrations WHERE version=%s", (SCHEMA_VERSION,)
             ).fetchone():
                 raise RuntimeError("Run python -m scripts.migrate before starting the API")
         embedder.warmup()
@@ -44,11 +45,13 @@ async def _lifespan(app: FastAPI):
             app.state.models_ready = False
 
 
-app = FastAPI(title="Production RAG", version="0.3.0", lifespan=_lifespan)
+app = FastAPI(title="Production RAG", version="0.4.0", lifespan=_lifespan)
 app.add_middleware(RequestMiddleware)
 app.include_router(query.router)
 app.include_router(health.router)
 app.include_router(ingest.router)
+app.include_router(workspaces.router)
+app.include_router(demo.router)
 
 
 @app.exception_handler(redis.RedisError)

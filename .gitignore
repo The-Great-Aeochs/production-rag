@@ -49,3 +49,12 @@ services/eval/results/
 .coverage
 htmlcov/
 coverage.xml
+
+# Website dependencies, output, credentials
+web/node_modules/
+web/.next/
+web/.vercel/
+web/.env*
+!web/.env.example
+web/*.tsbuildinfo
+web/next-env.d.ts
