@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from shared.config import settings
+from shared.schema import SCHEMA_VERSION
 from shared.security import require_admin
 
 router = APIRouter(tags=["health"])
@@ -43,7 +44,7 @@ def _ping_postgres(pool):
     with pool.connection() as conn:
         return (
             conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version='002_recoverable_ingestion'"
+                "SELECT 1 FROM schema_migrations WHERE version=%s", (SCHEMA_VERSION,)
             ).fetchone()
             is not None
         )

@@ -1,0 +1,189 @@
+# Website, login, and workspace access
+
+The Next.js app in `web/` includes a public showcase, clearly labeled guided
+examples, an optional live public demo, and a signed-in workspace dashboard.
+Publishing the website and running the RAG backend are separate deployments.
+
+## Run locally
+
+Use Node.js 24 and npm:
+
+```bash
+cd web
+cp .env.example .env.local
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:3000`. With empty credentials, the showcase and prewritten
+examples work; live inference and private workspaces fail closed. Run
+`npm run typecheck`, `npm test`, `npm run format:check`, and `npm run build` to
+verify the frontend. Dependencies are pinned in `package-lock.json`.
+
+## Deploy the showcase on Vercel
+
+1. Import this GitHub repository into your Vercel account.
+2. Set **Root Directory** to `web`, framework to Next.js, and Node.js to 24.x.
+   The checked-in `web/vercel.json` uses `npm ci` and `npm run build`.
+3. Deploy without credentials first to publish the showcase and guided examples.
+4. Add the login/backend variables below, then redeploy to enable workspaces.
+   `NEXT_PUBLIC_` values are embedded at build time.
+5. Configure a stable production domain and the corresponding Clerk allowed
+   origins/redirect URLs. Keep preview and production credentials separate.
+
+Vercel's [Hobby plan](https://vercel.com/docs/plans/hobby) is free within its
+limits for personal, non-commercial use. Check current plan terms before launch.
+It does not provide this project's Python model service, Postgres, Qdrant,
+Redis, S3 storage, or Ollama capacity. Provision those separately using
+[the operations guide](production.md). There is no deployed URL or hosting
+account included with this repository.
+
+## Configure Clerk and the API
+
+Create a Clerk application and enable the sign-in methods you want. Configure
+its JWT template named `production-rag` with:
+
+- RS256 signing, the Clerk instance's normal JWKS, and a short lifetime (for
+  example, 60 seconds).
+- `aud`: `production-rag`.
+- The normal immutable user `sub`, exact Clerk `iss`, `iat`, and `exp` claims.
+- If using authorized-party checks, include `azp` from the session origin and
+  allow only the exact intended origins on the backend. Confirm the issued
+  template actually contains that claim before enabling the check.
+
+Do not put workspace roles or permissions in user-editable claims. The API
+looks them up in Postgres for each request. See
+[Clerk JWT templates](https://clerk.com/docs/guides/sessions/jwt-templates).
+
+Configure these **backend** variables:
+
+```dotenv
+JWT_ISSUER=https://your-instance.clerk.accounts.dev
+JWT_AUDIENCE=production-rag
+JWT_AUTHORIZED_PARTIES=["https://your-app.vercel.app"]
+MAX_WORKSPACES_PER_USER=3
+```
+
+Copy the exact `iss` from your Clerk configuration; do not add or remove a
+trailing slash. The backend fetches keys only from that configured HTTPS issuer's
+`/.well-known/jwks.json`. It verifies signature, RS256, expiry, issuer, audience,
+issued-at, and subject. Set the audience to the same value in both places.
+`JWT_AUTHORIZED_PARTIES=[]` disables the optional additional origin check.
+
+Configure these **Vercel** environment variables:
+
+| Variable | Value / scope |
+| --- | --- |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk publishable key; intentionally public |
+| `CLERK_SECRET_KEY` | Clerk server secret; server only |
+| `CLERK_JWT_TEMPLATE` | `production-rag` |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_URL` | `/sign-in` |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL` | `/workspace` |
+| `SITE_URL` | Canonical public HTTPS website URL for social sharing; Vercel URL is the fallback |
+| `RAG_API_URL` | HTTPS URL of your running FastAPI service, without a query or fragment |
+| `DEMO_PROXY_SECRET` | Only if enabling the public demo below; server only |
+
+Never copy `ADMIN_API_KEY`, infrastructure passwords, or a privileged service
+API key into the frontend or a `NEXT_PUBLIC_` variable. The Next.js gateway
+obtains a token from the authenticated Clerk session and sends it to the API;
+it ignores authorization credentials supplied by the browser. Its route
+allowlist excludes platform administration and metrics. Mutations require a
+matching Origin, request bodies are bounded, and private responses use no-store.
+TLS is required for a remote backend; plain HTTP is accepted only on localhost.
+
+Apply all migrations, including `003_workspaces.sql`, before updating API and
+worker processes:
+
+```bash
+uv run --extra models python -m scripts.migrate
+```
+
+Migration 003 is additive. Readiness requires the current schema. Existing
+service keys retain their configured corpus access; they cannot administer user
+memberships. Existing corpora do not become visible to signed-in users.
+
+## Workspace roles
+
+RBAC means **role-based access control**. A workspace is a corpus with its own
+membership records. A user can create up to the configured number of workspaces
+where they hold the admin role. Workspace IDs are generated by the API.
+
+| Role | Query / document metadata | Refresh connected source | Manage members / audit |
+| --- | --- | --- | --- |
+| Visitor | Public demo only | No | No |
+| Member | Own workspaces | No | No |
+| Editor | Own workspaces | Yes | No |
+| Admin | Own workspaces | Yes | Yes |
+
+Sign in and open `/workspace` to register your internal user ID. Create a
+workspace there. To add someone, they must first sign in and open the workspace
+page, then share their displayed `usr_...` ID with an admin. The admin adds that
+ID from Members. Email invitations are not part of this release.
+
+The API checks memberships on every protected request, scopes both retrieval
+paths by corpus, and denies access to unrelated jobs/documents. Membership
+changes increment an access version used by cache/session ownership. Revoking
+and re-adding a user does not restore their old sessions. Changes take effect
+on subsequent requests; already-authorized in-flight requests may finish.
+The last admin cannot be removed or demoted, including concurrent updates.
+Workspace admins cannot access platform administration endpoints.
+
+Membership and source-refresh changes have a transactional audit trail.
+The UI displays the latest 100 events. Set database backup, retention, export,
+and account-deletion procedures for your deployment; the UI is not a complete
+compliance archive. This release provides workspace boundaries, not per-document
+ACLs, enterprise SSO provisioning, or group synchronization.
+
+## Connect a document source
+
+An operator obtains the `ws_...` ID from `GET /workspaces` and places trusted
+source files under `INGEST_ROOT/<workspace-id>/` on the worker's filesystem.
+API and worker must use the same mounted source tree. Editors/admins can then
+choose **Refresh source**; members cannot. Refresh always snapshots that whole
+workspace root and reuses a pending/processing job to avoid duplicate queues.
+Missing source directories return a clear error. User-provided arbitrary server
+paths and browser uploads are not exposed.
+
+## Enable the capped public demo
+
+Keep private documents out of the demo corpus. Use a dedicated public corpus and
+a new independent random secret of at least 32 characters:
+
+```dotenv
+DEMO_ENABLED=true
+DEMO_CORPUS_ID=public-demo
+DEMO_PROXY_SECRET=<independent-random-secret>
+DEMO_QUERIES_PER_MINUTE=5
+DEMO_QUERIES_PER_DAY=50
+```
+
+Set the same `DEMO_PROXY_SECRET` on Vercel, seed the six curated public fixture
+documents, and let the worker finish ingestion:
+
+```bash
+uv run --extra models python -m scripts.seed_demo
+```
+
+The gateway forwards only the question. The API fixes corpus and top-k,
+disallows sessions/private filters, and enforces shared Redis quotas across
+replicas. Quota-store failures deny live calls. Quotas use UTC minute/day
+windows and count admitted attempts, including cache hits and failed model
+calls; they limit calls, not a guaranteed dollar spend. Configure provider
+spending limits, edge request limits, and alerts before advertising the live
+demo broadly. Guided examples remain available when live inference is disabled
+or a quota is exhausted.
+
+## Launch verification
+
+- Confirm login, sign-out, workspace creation, and a live cited answer with your
+  real Clerk application and deployed backend.
+- Test an outsider, member, editor, and admin account; verify denied API calls,
+  membership revocation, source refresh, and workspace switching.
+- Check `/health/ready`, worker recovery, backups, demo quotas, and error alerts.
+- Load-test your own hardware and evaluate representative documents. The public
+  12-question synthetic smoke result is not a capacity or customer-quality SLA.
+
+CI tests backend authorization against real Postgres, verifies frontend gateway
+boundaries and components, and builds the website without credentials. Live
+Clerk login and deployed inference still require the deployment verification
+above; no real credentials or paid services are used by CI.

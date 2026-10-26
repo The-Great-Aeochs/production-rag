@@ -1,0 +1,26 @@
+{
+  "scope": "Synthetic 12-question project smoke test; not customer-domain quality or service capacity.",
+  "hardware": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "device": "cpu",
+  "embedding_model": "BAAI/bge-base-en-v1.5",
+  "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+  "vector_backend": "Qdrant local (exact search)",
+  "database": "PostgreSQL 16.2, isolated schema",
+  "summary": {
+    "total_cases": 12,
+    "hit_rate_at_k": 1,
+    "mrr": 1.0,
+    "precision_at_k": 0.2,
+    "latency_p50_ms": 34.709930419921875,
+    "latency_p95_ms": 52.85906791687012,
+    "latency_mean_ms": 36.20294729868571
+  },
+  "embedding_revision": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a",
+  "reranker_revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+  "pull_request": "https://github.com/The-Great-Aeochs/production-rag/pull/2",
+  "provenance": {
+    "evaluated_source": "Working tree before the initial production-foundation commit; the downloaded weights match the pinned model revisions.",
+    "review_head": "b222bd5660ebfa83afe621e96c2291e3719fce41",
+    "scope_note": "Subsequent changes cover token/session authorization and CI; this report is a retrieval-only fixture smoke test."
+  }
+}

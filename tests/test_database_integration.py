@@ -38,7 +38,8 @@ def db():
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         conn.execute((ROOT / "services/ingestion/init.sql").read_text())
-        conn.execute((ROOT / "migrations/002_recoverable_ingestion.sql").read_text())
+        for migration in sorted((ROOT / "migrations").glob("*.sql")):
+            conn.execute(migration.read_text())
         try:
             yield conn
         finally:
@@ -125,7 +126,7 @@ def test_migrations_are_transactional_and_repeatable(db, monkeypatch):
     monkeypatch.setattr(migrate, "get_pg_conn", borrowed)
     migrate.migrate()
     migrate.migrate()
-    assert db.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 2
+    assert db.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 3
 
 
 def test_both_retrieval_backends_enforce_corpus_and_source_filters(db, stores):
