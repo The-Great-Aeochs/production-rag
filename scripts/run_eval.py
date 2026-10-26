@@ -18,12 +18,14 @@ Usage:
 import argparse
 import logging
 import sys
+from importlib.resources import files
 from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.eval.eval_runner import print_summary, run_eval
+from services.eval.metrics import quality_failures
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +37,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run RAG evaluation")
     parser.add_argument(
         "--test-set",
-        default="services/eval/test_sets/v1.json",
+        default=str(files("services.eval").joinpath("test_sets/v1.json")),
         help="Path to test set JSON file",
     )
     parser.add_argument(
@@ -74,12 +76,11 @@ def main():
 
     print_summary(results)
 
-    # Exit with non-zero if critical metrics fail
-    summary = results["summary"]
-    if summary.get("hit_rate_at_k", 0) < 0.85:
-        print("WARNING: Hit Rate below target (0.85)")
-    if summary.get("faithfulness", 1.0) < 0.90:
-        print("WARNING: Faithfulness below target (0.90)")
+    failures = quality_failures(results["summary"], args.mode)
+    for failure in failures:
+        print(f"FAIL: {failure}")
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Hybrid retrieval: Qdrant semantic search + Postgres BM25 keyword search.
+"""Hybrid retrieval: Qdrant semantic search + Postgres full-text keyword search.
 
 Results are merged via Reciprocal Rank Fusion (RRF) to combine the
 strengths of both approaches — semantic catches meaning, keyword
@@ -11,6 +11,8 @@ import psycopg
 from qdrant_client import QdrantClient
 
 from shared.config import settings
+from shared.db import get_pg_conn
+from shared.filters import validate_filters
 from shared.models import RetrievalResult
 
 log = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ def semantic_search(
     qdrant: QdrantClient,
     filters: dict | None = None,
     top_k: int = 30,
+    conn: psycopg.Connection | None = None,
+    pool=None,
 ) -> list[RetrievalResult]:
     """Vector similarity search in Qdrant."""
     from qdrant_client.models import (
@@ -31,12 +35,11 @@ def semantic_search(
         SearchParams,
     )
 
+    filters = validate_filters(filters)
+    filters.setdefault("corpus_id", settings.corpus_id)
     query_filter = None
     if filters:
-        conditions = [
-            FieldCondition(key=k, match=MatchValue(value=v))
-            for k, v in filters.items()
-        ]
+        conditions = [FieldCondition(key=k, match=MatchValue(value=v)) for k, v in filters.items()]
         query_filter = Filter(must=conditions)
 
     # The collection stores INT8-quantized vectors. Rescore the top candidates
@@ -54,17 +57,48 @@ def semantic_search(
         search_params=search_params,
     )
 
+    # Qdrant payloads are candidates, never an authorization/content authority.
+    # Deleted, pending, stale-version and foreign chunks must not reach generation.
+    if pool is not None:
+        with pool.connection() as pooled_conn:
+            return hydrate_results(results.points, pooled_conn, filters)
+    if conn is None:
+        with get_pg_conn(autocommit=True) as owned_conn:
+            return hydrate_results(results.points, owned_conn, filters)
+    return hydrate_results(results.points, conn, filters)
+
+
+def hydrate_results(points, conn, filters: dict[str, str]) -> list[RetrievalResult]:
+    if not points:
+        return []
+    clauses, params = _filter_sql(filters)
+    params["ids"] = [str(point.id) for point in points]
+    rows = conn.execute(
+        "SELECT c.chunk_id, c.content, c.source_path, c.section_path FROM chunks c "
+        "JOIN documents d ON d.doc_id=c.doc_id WHERE d.sync_status='ready' "
+        "AND c.chunk_id = ANY(%(ids)s) AND " + " AND ".join(clauses),
+        params,
+    ).fetchall()
+    valid = {row[0]: row for row in rows}
     return [
         RetrievalResult(
             chunk_id=str(point.id),
-            content=point.payload.get("content", ""),
-            source_path=point.payload.get("source_path", ""),
-            section_path=point.payload.get("section_path", []),
+            content=valid[str(point.id)][1],
+            source_path=valid[str(point.id)][2],
+            section_path=valid[str(point.id)][3] or [],
             score=point.score,
             retrieval_method="semantic",
         )
-        for point in results.points
+        for point in points
+        if str(point.id) in valid
     ]
+
+
+def _filter_sql(filters: dict[str, str] | None) -> tuple[list[str], dict]:
+    filters = validate_filters(filters)
+    filters.setdefault("corpus_id", settings.corpus_id)
+    # Columns come exclusively from the shared allowlist; values are parameters.
+    return ([f"c.{key} = %({key})s" for key in sorted(filters)], dict(filters))
 
 
 def keyword_search(
@@ -74,25 +108,18 @@ def keyword_search(
     top_k: int = 30,
 ) -> list[RetrievalResult]:
     """Full-text search in Postgres using tsvector."""
-    # Build the tsquery from the user's query
-    where_clauses = ["search_vector @@ websearch_to_tsquery('english', %(query)s)"]
-    params: dict = {"query": query, "limit": top_k}
-
-    if filters:
-        if "doc_type" in filters:
-            where_clauses.append("doc_type = %(doc_type)s")
-            params["doc_type"] = filters["doc_type"]
-        if "language" in filters:
-            where_clauses.append("language = %(language)s")
-            params["language"] = filters["language"]
-
-    where = " AND ".join(where_clauses)
+    clauses, params = _filter_sql(filters)
+    clauses.extend(
+        ["d.sync_status = 'ready'", "search_vector @@ websearch_to_tsquery('english', %(query)s)"]
+    )
+    params.update(query=query, limit=top_k)
+    where = " AND ".join(clauses)
     sql = f"""
-        SELECT chunk_id, content, source_path, section_path,
+        SELECT c.chunk_id, c.content, c.source_path, c.section_path,
                ts_rank_cd(search_vector, websearch_to_tsquery('english', %(query)s)) AS score
-        FROM chunks
+        FROM chunks c JOIN documents d ON d.doc_id=c.doc_id
         WHERE {where}
-        ORDER BY score DESC
+        ORDER BY score DESC, c.chunk_id
         LIMIT %(limit)s
     """
 
@@ -128,15 +155,16 @@ def reciprocal_rank_fusion(
             scores[result.chunk_id] = scores.get(result.chunk_id, 0.0) + rrf_score
 
             # Keep the result with the higher individual score
-            if result.chunk_id not in best_result or result.score > best_result[result.chunk_id].score:
+            if (
+                result.chunk_id not in best_result
+                or result.score > best_result[result.chunk_id].score
+            ):
                 best_result[result.chunk_id] = result
 
     # Sort by RRF score descending
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     return [
-        best_result[chunk_id].model_copy(
-            update={"score": rrf_score, "retrieval_method": "hybrid"}
-        )
+        best_result[chunk_id].model_copy(update={"score": rrf_score, "retrieval_method": "hybrid"})
         for chunk_id, rrf_score in ranked
     ]

@@ -1,55 +1,63 @@
-"""Health check endpoint for all downstream services."""
+"""Separate process liveness from dependency/model readiness."""
 
 import httpx
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from shared.config import settings
+from shared.security import require_admin
 
 router = APIRouter(tags=["health"])
 
 
+@router.get("/health/live")
+def liveness():
+    return {"status": "alive"}
+
+
 @router.get("/health")
-def health_check(request: Request):
-    checks = {
-        "qdrant": _ping_qdrant(request.app.state.qdrant),
-        "postgres": _ping_postgres(request.app.state.pg_pool),
-        "redis": _ping_redis(request.app.state.redis),
-        "ollama": _ping_ollama(),
+@router.get("/health/ready")
+def readiness(request: Request):
+    checks = {}
+    operations = {
+        "postgres": lambda: _ping_postgres(request.app.state.pg_pool),
+        "qdrant": lambda: request.app.state.qdrant.collection_exists(settings.qdrant_collection),
+        "redis": request.app.state.redis.ping,
+        "ollama": _ping_ollama,
+        "models": lambda: request.app.state.models_ready,
     }
-    all_critical = checks["qdrant"] and checks["postgres"]
-    status = "healthy" if all_critical else "unhealthy"
-    code = 200 if all_critical else 503
-    return JSONResponse({"status": status, "checks": checks}, status_code=code)
+    for name, operation in operations.items():
+        try:
+            checks[name] = bool(operation())
+        except Exception:
+            checks[name] = False
+    ready = all(checks.values())
+    return JSONResponse(
+        {"status": "ready" if ready else "unavailable", "checks": checks},
+        status_code=200 if ready else 503,
+    )
 
 
-def _ping_qdrant(client) -> bool:
-    try:
-        client.get_collections()
-        return True
-    except Exception:
-        return False
+def _ping_postgres(pool):
+    with pool.connection() as conn:
+        return (
+            conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version='002_recoverable_ingestion'"
+            ).fetchone()
+            is not None
+        )
 
 
-def _ping_postgres(pool) -> bool:
-    try:
-        with pool.connection() as conn:
-            conn.execute("SELECT 1")
-        return True
-    except Exception:
-        return False
+def _ping_ollama():
+    response = httpx.get(f"{settings.ollama_url}/api/tags", timeout=settings.dependency_timeout_s)
+    response.raise_for_status()
+    # A live inference service without the configured model is not ready.
+    return any(
+        model.get("name") == settings.ollama_model for model in response.json().get("models", [])
+    )
 
 
-def _ping_redis(client) -> bool:
-    try:
-        return client.ping()
-    except Exception:
-        return False
-
-
-def _ping_ollama() -> bool:
-    try:
-        resp = httpx.get(f"{settings.ollama_url}/api/tags", timeout=2.0)
-        return resp.status_code == 200
-    except Exception:
-        return False
+@router.get("/metrics", dependencies=[Depends(require_admin)])
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

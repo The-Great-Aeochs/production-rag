@@ -41,3 +41,11 @@ logs/
 
 # Eval outputs
 eval_results/
+
+# Local credentials and model/tokenizer caches
+.cache/
+.tokenizer-cache/
+services/eval/results/
+.coverage
+htmlcov/
+coverage.xml

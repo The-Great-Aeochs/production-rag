@@ -39,9 +39,7 @@ def parse_python(content: str, source_path: str) -> list[Section]:
             name = _extract_name(child, content)
             body = content[child.start_byte : child.end_byte]
 
-            sections.append(
-                Section(title=name, content=body, level=1, language="python")
-            )
+            sections.append(Section(title=name, content=body, level=1, language="python"))
             prev_end = child.end_byte
         else:
             # Non-structural node — accumulate as preamble

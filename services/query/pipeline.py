@@ -1,52 +1,143 @@
-"""Query pipeline orchestrator.
-
-Wires together: session → rewrite → cache → embed → retrieve → rerank → generate.
-Retrieval runs the semantic and keyword legs in parallel, each with a timeout
-budget; if a leg fails or times out the pipeline degrades to the other leg's
-results rather than blocking.
-
-Multi-turn flow:
-- If session_id is provided, load conversation history from Redis
-- Rewrite the query using history context (coreference resolution)
-- Use the rewritten query for retrieval + generation
-- Save user message + assistant response back to session
-"""
+"""Shared preparation/completion for regular and streaming RAG requests."""
 
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
+from threading import BoundedSemaphore
 
 import redis
+from fastapi import HTTPException
 from psycopg_pool import ConnectionPool
 from qdrant_client import QdrantClient
 
-from shared.config import settings
-from shared.models import ConversationMessage, QueryRequest, QueryResponse, RetrievalResult
 from services.ingestion.embedder import embed_query
-from services.query.cache import get_cached, set_cached
+from services.query.cache import get_cached, query_key, set_cached
 from services.query.generator import PROMPT_VERSION, generate
 from services.query.reranker import rerank
 from services.query.retriever import keyword_search, reciprocal_rank_fusion, semantic_search
 from services.query.rewriter import rewrite_query
-from services.query.session import (
-    add_message,
-    create_session,
-    get_recent_messages,
-    get_summary,
-    session_exists,
-)
+from services.query.session import append_turn, get_recent_messages, get_summary, session_owned_by
+from shared.config import settings
+from shared.models import ConversationMessage, QueryRequest, QueryResponse, RetrievalResult
 
 log = logging.getLogger(__name__)
-
-# Shared pool for running the two retrieval legs concurrently. Sized to cover
-# several in-flight queries (2 legs each) without unbounded thread growth.
 _RETRIEVAL_POOL = ThreadPoolExecutor(max_workers=16, thread_name_prefix="retrieval")
+_RETRIEVAL_SLOTS = BoundedSemaphore(16)
+NO_RESULTS = "I couldn't find any relevant information to answer your question."
 
 
-def _count_tokens_approx(text: str) -> int:
-    """Fast approximate token count (1 token ~ 4 chars)."""
-    return len(text) // 4
+@dataclass
+class PreparedQuery:
+    request: QueryRequest
+    search_query: str
+    owner: str = "local"
+    session_lock: object = None
+    history: list[ConversationMessage] = field(default_factory=list)
+    summary: str | None = None
+    chunks: list[RetrievalResult] = field(default_factory=list)
+    cached: QueryResponse | None = None
+    cache_key: str | None = None
+    timings: dict[str, float] = field(default_factory=dict)
+    started: float = field(default_factory=time.monotonic)
+
+
+def prepare_query(
+    request: QueryRequest, pool, qdrant, redis_client, owner: str = "local"
+) -> PreparedQuery:
+    state = PreparedQuery(request=request, search_query=request.query, owner=owner)
+    try:
+        return _prepare_query(state, pool, qdrant, redis_client)
+    except BaseException:
+        release_query(state)
+        raise
+
+
+def _prepare_query(state, pool, qdrant, redis_client):
+    request, owner = state.request, state.owner
+    if request.session_id:
+        # Ownership checks fail closed; infrastructure failures must never bypass them.
+        if not session_owned_by(request.session_id, owner, redis_client):
+            raise HTTPException(404, "Session not found")
+        state.session_lock = redis_client.lock(
+            f"session:{request.session_id}:lock",
+            thread_local=False,
+            timeout=settings.generation_timeout_s + settings.rewrite_timeout_s + 30,
+        )
+        if not state.session_lock.acquire(blocking=False):
+            state.session_lock = None
+            raise HTTPException(409, "A query is already running for this session")
+        state.history = get_recent_messages(request.session_id, redis_client)
+        state.summary = get_summary(request.session_id, redis_client)
+        try:
+            state.search_query = rewrite_query(request.query, state.history, state.summary)
+        except Exception:
+            log.warning("Query rewrite failed; using original query")
+    # History-dependent answers are not shared or cached. Revision lookup is also
+    # required on cache reads: an unavailable authority must not serve stale data.
+    if request.use_cache and not request.session_id:
+        try:
+            corpus = (request.filters or {}).get("corpus_id", settings.corpus_id)
+            with pool.connection() as conn:
+                row = conn.execute(
+                    "SELECT revision FROM corpora WHERE corpus_id=%s", (corpus,)
+                ).fetchone()
+            state.cache_key = query_key(request, owner, row[0] if row else 0, PROMPT_VERSION)
+            state.cached = get_cached(state.cache_key, redis_client)
+        except Exception:
+            state.cache_key = None
+            log.warning("Cache unavailable; continuing without caching")
+        if state.cached:
+            state.cached = state.cached.model_copy(
+                update={"cached": True, "latency_ms": {"total": _ms(state.started)}}
+            )
+            return state
+    started = time.monotonic()
+    embedding = embed_query(state.search_query)
+    state.timings["embed"] = _ms(started)
+    started = time.monotonic()
+    state.chunks = retrieve_and_rerank(
+        state.search_query,
+        embedding,
+        pool,
+        qdrant,
+        request.filters,
+        request.top_k,
+    )
+    state.timings["retrieval"] = _ms(started)
+    return state
+
+
+def complete_query(state: PreparedQuery, answer: str, pool, redis_client) -> QueryResponse:
+    state.timings["total"] = _ms(state.started)
+    response = QueryResponse(
+        answer=answer,
+        sources=state.chunks,
+        session_id=state.request.session_id,
+        latency_ms=state.timings,
+        model_used=settings.ollama_model,
+        prompt_version=PROMPT_VERSION,
+    )
+    if state.request.session_id:
+        if not append_turn(
+            state.request.session_id,
+            state.owner,
+            state.session_lock.local.token,
+            state.request.query,
+            answer,
+            redis_client,
+        ):
+            raise HTTPException(
+                409, "Session expired or its query lease ended; retry in a new session"
+            )
+    if state.cache_key and state.chunks:
+        try:
+            set_cached(state.cache_key, response, redis_client)
+        except Exception:
+            log.warning("Cache write failed")
+    _safe_log_query(state.request, state.chunks, response, pool)
+    return response
 
 
 def run_query(
@@ -54,298 +145,118 @@ def run_query(
     pool: ConnectionPool,
     qdrant: QdrantClient,
     redis_client: redis.Redis,
+    owner: str = "local",
 ) -> QueryResponse:
-    """Execute the full query pipeline synchronously."""
-    timings: dict[str, float] = {}
-    total_start = time.time()
-
-    # 0. Session handling: load history + rewrite query
-    session_id = request.session_id
-    history: list[ConversationMessage] = []
-    summary: str | None = None
-    search_query = request.query  # default: use raw query
-
-    if session_id:
-        t = time.time()
-        if not session_exists(session_id, redis_client):
-            session_id = create_session(redis_client)
-
-        history = _safe_load_history(session_id, redis_client)
-        summary = _safe_load_summary(session_id, redis_client)
-        timings["session_load"] = _ms(t)
-
-        # Rewrite query using conversation context
-        if history:
-            t = time.time()
-            search_query = _safe_rewrite(request.query, history, summary)
-            timings["rewrite"] = _ms(t)
-            if search_query != request.query:
-                log.info(f"Rewrote query: '{request.query}' -> '{search_query}'")
-
-        # Save the user message to session
-        _safe_add_message(session_id, ConversationMessage(
-            role="user",
-            content=request.query,
-            token_count=_count_tokens_approx(request.query),
-        ), redis_client)
-
-    # 1. Embed the (possibly rewritten) query
-    t = time.time()
-    query_embedding = embed_query(search_query)
-    timings["embed"] = _ms(t)
-
-    # 2. Check cache (keyed on the rewritten query text)
-    if request.use_cache:
-        t = time.time()
-        cached = _safe_cache_get(search_query, redis_client)
-        timings["cache_check"] = _ms(t)
-        if cached is not None:
-            cached.cached = True
-            cached.session_id = session_id
-            cached.latency_ms = timings
-            # Still save the assistant response to session
-            if session_id:
-                _safe_add_message(session_id, ConversationMessage(
-                    role="assistant",
-                    content=cached.answer,
-                    token_count=_count_tokens_approx(cached.answer),
-                ), redis_client)
-            return cached
-
-    # 3. Hybrid retrieval (parallel) + 4. rerank
-    t = time.time()
-    top_chunks = retrieve_and_rerank(
-        search_query, query_embedding, pool, qdrant, request.filters, request.top_k
-    )
-    timings["retrieval"] = _ms(t)
-
-    if not top_chunks:
-        no_result = QueryResponse(
-            answer="I couldn't find any relevant information to answer your question.",
-            session_id=session_id,
-            latency_ms=timings,
-            model_used=settings.ollama_model,
-            prompt_version=PROMPT_VERSION,
-        )
-        if session_id:
-            _safe_add_message(session_id, ConversationMessage(
-                role="assistant",
-                content=no_result.answer,
-                token_count=_count_tokens_approx(no_result.answer),
-            ), redis_client)
-        return no_result
-
-    # 5. Generate (pass conversation history for context)
-    t = time.time()
-    answer = generate(
-        search_query,
-        top_chunks,
-        history=history if session_id else None,
-        summary=summary,
-    )
-    timings["generation"] = _ms(t)
-
-    timings["total"] = _ms(total_start)
-
-    response = QueryResponse(
-        answer=answer,
-        sources=top_chunks,
-        cached=False,
-        session_id=session_id,
-        latency_ms=timings,
-        model_used=settings.ollama_model,
-        prompt_version=PROMPT_VERSION,
-    )
-
-    # 6. Save assistant response to session
-    if session_id:
-        _safe_add_message(session_id, ConversationMessage(
-            role="assistant",
-            content=answer,
-            token_count=_count_tokens_approx(answer),
-        ), redis_client)
-
-    # 7. Cache the response (keyed on the rewritten query text, best-effort)
-    _safe_cache_set(search_query, response, redis_client)
-
-    # 8. Log query (best-effort)
-    _safe_log_query(request, top_chunks, response, pool)
-
-    return response
+    state = prepare_query(request, pool, qdrant, redis_client, owner)
+    try:
+        if state.cached:
+            return state.cached
+        answer = NO_RESULTS
+        if state.chunks:
+            started = time.monotonic()
+            answer = generate(state.search_query, state.chunks, state.history, state.summary)
+            state.timings["generation"] = _ms(started)
+        return complete_query(state, answer, pool, redis_client)
+    finally:
+        release_query(state)
 
 
-def retrieve_and_rerank(
-    search_query: str,
-    query_embedding: list[float],
-    pool: ConnectionPool,
-    qdrant: QdrantClient,
-    filters: dict | None,
-    top_k: int,
-) -> list[RetrievalResult]:
-    """Parallel hybrid retrieval (semantic + keyword) → RRF merge → rerank.
+def release_query(state):
+    if state.session_lock is not None:
+        try:
+            state.session_lock.release()
+        except redis.exceptions.LockError:
+            pass  # Expired locks never authorize a late conversation write.
+        except redis.RedisError:
+            log.warning("Session lock release failed; it will expire")
+        finally:
+            state.session_lock = None
 
-    Shared by the blocking and streaming query paths. Each retrieval leg runs
-    with its own timeout budget; a slow or failing leg degrades to the other.
-    Returns the reranked top-k chunks (possibly empty).
-    """
-    semantic_results, keyword_results = _parallel_retrieve(
-        query_embedding, search_query, pool, qdrant, filters
-    )
 
-    merged = reciprocal_rank_fusion(semantic_results, keyword_results)
-    log.info(
-        f"Retrieved {len(semantic_results)} semantic + {len(keyword_results)} keyword "
-        f"= {len(merged)} merged"
-    )
-
+def retrieve_and_rerank(search_query, query_embedding, pool, qdrant, filters, top_k):
+    semantic, keyword = _parallel_retrieve(query_embedding, search_query, pool, qdrant, filters)
+    merged = reciprocal_rank_fusion(semantic, keyword)
     if not merged:
         return []
-
-    return _safe_rerank(search_query, merged, top_k)
-
-
-def _parallel_retrieve(
-    embedding: list[float],
-    query: str,
-    pool: ConnectionPool,
-    qdrant: QdrantClient,
-    filters: dict | None,
-) -> tuple[list[RetrievalResult], list[RetrievalResult]]:
-    """Run both retrieval legs concurrently, each bounded by a timeout."""
-    semantic_future = _RETRIEVAL_POOL.submit(_safe_semantic, embedding, qdrant, filters)
-    keyword_future = _RETRIEVAL_POOL.submit(_safe_keyword, query, pool, filters)
-
-    semantic_results = _await_leg(semantic_future, "semantic")
-    keyword_results = _await_leg(keyword_future, "keyword")
-    return semantic_results, keyword_results
-
-
-def _await_leg(future, name: str) -> list[RetrievalResult]:
     try:
-        return future.result(timeout=settings.retrieval_timeout_s)
-    except FutureTimeoutError:
-        log.warning(f"{name} retrieval timed out after {settings.retrieval_timeout_s}s")
-        return []
-    except Exception as e:
-        log.warning(f"{name} retrieval failed: {e}")
-        return []
+        return rerank(search_query, merged, top_k)
+    except Exception:
+        log.warning("Reranker failed; using fused retrieval order")
+        return merged[:top_k]
 
 
-def _safe_load_history(
-    session_id: str, client: redis.Redis
-) -> list[ConversationMessage]:
-    try:
-        return get_recent_messages(session_id, client)
-    except Exception as e:
-        log.warning(f"Session history load failed: {e}")
-        return []
+def _parallel_retrieve(embedding, query, pool, qdrant, filters):
+    futures = [
+        _submit(_semantic, embedding, qdrant, pool, filters),
+        _submit(_keyword, query, pool, filters),
+    ]
+    # A shared deadline prevents sequential waits from doubling the budget.
+    done, pending = wait(
+        [f for f in futures if f is not None], timeout=settings.retrieval_timeout_s
+    )
+    for future in pending:
+        future.cancel()
+    results = []
+    failures = 0
+    for future in futures:
+        if future not in done:
+            results.append([])
+            failures += 1
+            continue
+        try:
+            results.append(future.result())
+        except Exception:
+            log.warning("Retrieval dependency failed")
+            results.append([])
+            failures += 1
+    if failures == 2:
+        raise HTTPException(503, "Search is temporarily unavailable")
+    return tuple(results)
 
 
-def _safe_load_summary(session_id: str, client: redis.Redis) -> str | None:
-    try:
-        return get_summary(session_id, client)
-    except Exception as e:
-        log.warning(f"Session summary load failed: {e}")
+def _submit(function, *args):
+    # A timed-out caller cannot leave an unbounded queue of retrieval tasks.
+    if not _RETRIEVAL_SLOTS.acquire(blocking=False):
         return None
-
-
-def _safe_rewrite(
-    query: str,
-    history: list[ConversationMessage],
-    summary: str | None,
-) -> str:
     try:
-        return rewrite_query(query, history, summary)
-    except Exception as e:
-        log.warning(f"Query rewrite failed, using original: {e}")
-        return query
+        future = _RETRIEVAL_POOL.submit(function, *args)
+    except BaseException:
+        _RETRIEVAL_SLOTS.release()
+        raise
+    future.add_done_callback(lambda _: _RETRIEVAL_SLOTS.release())
+    return future
 
 
-def _safe_add_message(
-    session_id: str, message: ConversationMessage, client: redis.Redis
-) -> None:
-    try:
-        add_message(session_id, message, client)
-    except Exception as e:
-        log.warning(f"Session message save failed: {e}")
+def _semantic(embedding, qdrant, pool, filters):
+    return semantic_search(embedding, qdrant, filters, pool=pool)
 
 
-def _safe_semantic(
-    embedding: list[float], qdrant: QdrantClient, filters: dict | None
-) -> list[RetrievalResult]:
-    try:
-        return semantic_search(embedding, qdrant, filters)
-    except Exception as e:
-        log.warning(f"Semantic search failed: {e}")
-        return []
+def _keyword(query, pool, filters):
+    with pool.connection() as conn:
+        return keyword_search(query, conn, filters)
 
 
-def _safe_keyword(
-    query: str, pool: ConnectionPool, filters: dict | None
-) -> list[RetrievalResult]:
-    # Uses its own pooled connection so a slow query holds (and eventually
-    # releases) a dedicated connection rather than the request's.
-    try:
-        with pool.connection() as conn:
-            return keyword_search(query, conn, filters)
-    except Exception as e:
-        log.warning(f"Keyword search failed: {e}")
-        return []
-
-
-def _safe_rerank(
-    query: str, results: list[RetrievalResult], top_k: int
-) -> list[RetrievalResult]:
-    try:
-        return rerank(query, results, top_k)
-    except Exception as e:
-        log.warning(f"Reranker failed, using RRF order: {e}")
-        return results[:top_k]
-
-
-def _safe_cache_get(query: str, client: redis.Redis) -> QueryResponse | None:
-    try:
-        return get_cached(query, client)
-    except Exception as e:
-        log.warning(f"Cache read failed: {e}")
-        return None
-
-
-def _safe_cache_set(query: str, response: QueryResponse, client: redis.Redis) -> None:
-    try:
-        set_cached(query, response, client)
-    except Exception as e:
-        log.warning(f"Cache write failed: {e}")
-
-
-def _safe_log_query(
-    request: QueryRequest,
-    chunks: list[RetrievalResult],
-    response: QueryResponse,
-    pool: ConnectionPool,
-) -> None:
+def _safe_log_query(request, chunks, response, pool):
     try:
         with pool.connection() as conn:
             conn.execute(
-                """
-                INSERT INTO query_logs (query_text, filters, retrieved_chunks, answer,
-                                        model_used, prompt_version, latency_ms, cache_hit)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+                """INSERT INTO query_logs(query_text, filters, retrieved_chunks, answer,
+                   model_used, prompt_version, latency_ms, cache_hit)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
-                    request.query,
-                    json.dumps(request.filters) if request.filters else None,
-                    json.dumps([{"chunk_id": c.chunk_id, "score": c.score, "method": c.retrieval_method} for c in chunks]),
-                    response.answer,
+                    request.query if settings.log_query_content else "[redacted]",
+                    json.dumps(request.filters) if settings.log_query_content else None,
+                    json.dumps([{"chunk_id": c.chunk_id, "score": c.score} for c in chunks]),
+                    response.answer if settings.log_query_content else None,
                     response.model_used,
                     response.prompt_version,
                     json.dumps(response.latency_ms),
                     response.cached,
                 ),
             )
-    except Exception as e:
-        log.warning(f"Query logging failed: {e}")
+    except Exception:
+        log.warning("Query logging failed")
 
 
-def _ms(start: float) -> float:
-    return round((time.time() - start) * 1000, 1)
+def _ms(start):
+    return round((time.monotonic() - start) * 1000, 1)

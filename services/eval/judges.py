@@ -164,9 +164,7 @@ class LLMJudge:
             # The SDK reads ANTHROPIC_API_KEY from the environment; pass the
             # configured key explicitly only when one is set in settings.
             if settings.anthropic_api_key:
-                self._anthropic_client = anthropic.Anthropic(
-                    api_key=settings.anthropic_api_key
-                )
+                self._anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
             else:
                 self._anthropic_client = anthropic.Anthropic()
         return self._anthropic_client
@@ -231,9 +229,7 @@ class LLMJudge:
         prompt = RELEVANCY_PROMPT.format(question=question, answer=answer)
         return self._score_criterion(prompt, "Relevancy")
 
-    def evaluate_correctness(
-        self, question: str, expected_answer: str, actual_answer: str
-    ) -> int:
+    def evaluate_correctness(self, question: str, expected_answer: str, actual_answer: str) -> int:
         """Score correctness (1-3). 3 = matches reference answer."""
         prompt = CORRECTNESS_PROMPT.format(
             question=question,

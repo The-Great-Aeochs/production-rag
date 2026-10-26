@@ -69,10 +69,25 @@ def needs_rewrite(
 
     # Short queries with pronouns/demonstratives likely need rewriting
     pronoun_indicators = [
-        "it", "its", "that", "this", "those", "these",
-        "they", "them", "their", "he", "she",
-        "the same", "above", "previous", "earlier",
-        "more", "also", "too", "again",
+        "it",
+        "its",
+        "that",
+        "this",
+        "those",
+        "these",
+        "they",
+        "them",
+        "their",
+        "he",
+        "she",
+        "the same",
+        "above",
+        "previous",
+        "earlier",
+        "more",
+        "also",
+        "too",
+        "again",
     ]
     query_lower = query.lower()
     for indicator in pronoun_indicators:
@@ -102,10 +117,14 @@ def rewrite_query(
 
     history = _format_history(messages, summary)
     system = _get_rewrite_prompt()
-    user_content = f"/nothink\n{history}\n\nUser's latest question: {query}\n\nRewritten standalone query:"
+    user_content = (
+        f"/nothink\n{history}\n\nUser's latest question: {query}\n\nRewritten standalone query:"
+    )
 
     try:
-        with httpx.Client(timeout=httpx.Timeout(60.0, connect=5.0)) as client:
+        with httpx.Client(
+            timeout=httpx.Timeout(settings.rewrite_timeout_s, connect=settings.dependency_timeout_s)
+        ) as client:
             resp = client.post(
                 f"{settings.ollama_url}/api/chat",
                 json={
@@ -125,7 +144,7 @@ def rewrite_query(
                 log.warning("Rewriter produced suspicious output, using original query")
                 return query
 
-            log.info(f"Rewrote '{query}' -> '{rewritten}'")
+            log.debug("Rewrote follow-up query")
             return rewritten
 
     except Exception as e:

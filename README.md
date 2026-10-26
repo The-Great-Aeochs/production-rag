@@ -1,143 +1,88 @@
 # Production RAG
 
-A production-grade Retrieval-Augmented Generation system for technical documentation and codebases. Built from scratch — no LangChain, no LlamaIndex.
+A framework-free RAG service for technical documentation and Python code, with
+FastAPI, Qdrant vector retrieval, PostgreSQL full-text search, cross-encoder
+reranking, Ollama generation, Redis sessions/cache, and S3-compatible storage.
+
+The production foundation adds authenticated corpus boundaries, scoped caching,
+durable ingestion, recoverable document publication, and automated regression
+checks. Capacity, quality, and availability must still be validated on your
+representative corpus and deployment hardware.
 
 ## Architecture
 
-```
-User/API Client
-    |
-    v
-FastAPI Gateway
-    |
-    v
-Query Pipeline                    Ingestion Pipeline
-  session load (Redis)              parse (Markdown/Code/PDF)
-  query rewrite (multi-turn)        chunk (structural, 256-1024 tokens)
-  hybrid retrieval                  embed (BGE-base-en-v1.5, 768-dim)
-    Qdrant (semantic)               write (Qdrant + Postgres + MinIO)
-    Postgres (BM25 keyword)
-  cross-encoder rerank
-  LLM generation (Ollama)
-  Redis cache
-    |
-    v
-Data Layer
-  Qdrant (vectors) | Postgres+BM25 (metadata) | Redis (cache+sessions) | MinIO (raw docs)
+```text
+Bearer token → corpus-scoped API → session/rewrite → exact cache
+                                              ↓ miss
+                     embed → Qdrant + Postgres FTS → RRF → rerank → Ollama
+
+Admin → Postgres job queue → corpus-locked worker → parse/chunk/embed
+       → Postgres pending → Qdrant + S3 acknowledged writes → Postgres ready
 ```
 
-## Stack
+Qdrant returns candidate IDs; Postgres supplies authorized, published content.
+The keyword ranker is `ts_rank_cd`; it is not BM25. Conversation answers are never
+cached. Cache keys include owner, filters, model/prompt settings, and corpus revision.
 
-| Component | Technology |
-|-----------|-----------|
-| API | FastAPI |
-| Vector DB | Qdrant (self-hosted, HNSW + INT8 quantization) |
-| Keyword search | PostgreSQL (tsvector, weighted BM25) |
-| Embeddings | BGE-base-en-v1.5 via sentence-transformers |
-| Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 |
-| LLM | Ollama (Qwen3-8B locally, Claude API upgrade path) |
-| Cache + Sessions | Redis |
-| Object store | MinIO |
+## Local setup
 
-## Features
-
-- **Hybrid retrieval** — semantic (Qdrant) + keyword (Postgres BM25), merged via Reciprocal Rank Fusion
-- **Cross-encoder reranking** — ms-marco-MiniLM-L-6-v2 rescores top results
-- **Multi-turn conversations** — Redis session store, context-aware query rewriting for follow-up questions
-- **Structural chunking** — respects headings, function/class boundaries (tree-sitter for code), parent-child relationships
-- **Semantic caching** — hashed embeddings as cache keys, sub-100ms cache hits
-- **Graceful degradation** — every downstream call has a timeout and fallback
-- **Idempotent ingestion** — content hashing skips unchanged documents on re-runs
-- **Citation support** — LLM answers cite sources as `[Source: filename#section]`
-
-## Quick Start
+Requires Python 3.11–3.13, uv 0.11.2, Docker Compose for local infrastructure,
+Ollama, and a running supported S3-compatible object store.
 
 ```bash
-# Start infrastructure
+cp .env.example .env
+# Edit .env: independent random tokens/passwords and S3 endpoint/credentials.
+uv sync --locked --extra models --extra dev
 docker compose up -d
-
-# Qdrant UI:  http://localhost:6333/dashboard
-# Postgres:   localhost:5432 (db: ragdb)
-# MinIO UI:   http://localhost:9001
-# Redis:      localhost:6379
-
-# Install dependencies
-pip install -e .
-
-# Pull the LLM model
+uv run --extra models python -m scripts.migrate
+mkdir -p documents/default
+# Place documents under documents/default/.
 ollama pull hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL
-
-# Run ingestion on your docs
-python -m services.ingestion.bulk_runner ./documents
-
-# Start the API
-uvicorn services.api.main:app --reload
+uv run --extra models python -m services.ingestion.worker
+# In another terminal:
+uv run --extra models uvicorn services.api.main:app
 ```
 
-## API
+Set `RAG_ADMIN_TOKEN` and `RAG_API_TOKEN` in your shell to the separate tokens from
+`.env`. The environment mapping format is `API_KEYS={"<token>":"default"}`.
 
 ```bash
-# Health check
-curl http://localhost:8000/health
-
-# Single-turn query
-curl -X POST http://localhost:8000/query \
+curl -X POST http://localhost:8000/ingest \
+  -H "Authorization: Bearer $RAG_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"query": "how does the chunker work?"}'
-
-# Multi-turn conversation
-curl -X POST http://localhost:8000/session
-# {"session_id": "a1b2c3d4e5f6g7h8"}
+  -d '{"corpus_id":"default"}'
+# Returns 202 with a job_id. Poll GET /ingest/<job_id> with the admin token.
 
 curl -X POST http://localhost:8000/query \
+  -H "Authorization: Bearer $RAG_API_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"query": "how does the chunker work?", "session_id": "a1b2c3d4e5f6g7h8"}'
-
-curl -X POST http://localhost:8000/query \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "what about its performance?", "session_id": "a1b2c3d4e5f6g7h8"}'
-
-# Streaming response
-curl -X POST http://localhost:8000/query/stream \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "explain the writer module"}'
-
-# Trigger ingestion
-curl -X POST http://localhost:8000/ingest?directory=./documents
+  -d '{"query":"How are retries handled?","use_cache":false}'
 ```
 
-## Project Structure
+Use `POST /session` to create a token-owned conversation and pass `session_id` in
+queries. Use `POST /query/stream` for SSE; a final `error` event means the response
+is incomplete. `/health/live` is process liveness; `/health/ready` checks serving
+readiness. `/metrics` requires the admin token.
 
+The historical MinIO community repository is archived. Configure a supported
+S3 service. An optional `docker-compose.object-store.yml` accepts a verified image
+and command for local self-hosting; no unmaintained default image is selected.
+
+## Verification
+
+```bash
+uv run --extra dev ruff check .
+uv run --extra dev ruff format --check .
+uv run --extra dev mypy
+uv run --extra dev pytest -q
+# Includes database integration tests when TEST_DATABASE_URL is set:
+TEST_DATABASE_URL=postgresql://user:password@localhost/testdb uv run --extra dev pytest -q
 ```
-services/
-  api/            FastAPI gateway + routes
-  ingestion/      Parsers, chunker, embedder, writer, bulk runner
-  query/          Session, rewriter, retriever, reranker, generator, cache, pipeline
-shared/           Pydantic models, config, DB helpers
-prompts/          Versioned system + rewrite prompts
-documents/        Drop raw docs here for ingestion
-```
 
-## Configuration
+Tests create isolated schemas. Use a disposable database. Postgres integration
+covers retries, partial publication, tombstones, corpus isolation, and worker
+locks; Qdrant local mode and an injectable S3 fake cover retrieval and faults.
+CI runs Python 3.11–3.13 and builds the runtime container.
 
-Copy `.env.example` to `.env`. Key settings:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OLLAMA_MODEL` | `hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL` | LLM model for generation |
-| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Embedding model (768-dim) |
-| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder for reranking |
-| `SESSION_TTL` | `7200` | Conversation session TTL in seconds |
-| `CACHE_TTL` | `3600` | Query cache TTL in seconds |
-
-## Build Phases
-
-1. **Ingestion Pipeline** — parsers, chunker, embedder, writer, bulk runner (done)
-2. **Query Pipeline** — hybrid retrieval, reranking, generation, caching, multi-turn (done)
-3. **Quality + Eval** — test sets, metrics (Hit Rate, Faithfulness, MRR), guardrails
-4. **Kubernetes** — Minikube/K3s, HPA, liveness probes
-5. **Advanced** — long-term memory, multi-tenancy, streaming ingestion, model routing
-
-## License
-
-Private project.
+See [the operations guide](docs/production.md) for migrations, rollout, recovery,
+load measurement, evaluation, and remaining production decisions.

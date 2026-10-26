@@ -4,18 +4,27 @@ Takes the merged retrieval results and re-scores each (query, chunk)
 pair with a cross-encoder for more accurate relevance ranking.
 """
 
-from sentence_transformers import CrossEncoder
+from threading import Lock
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sentence_transformers import CrossEncoder
 
 from shared.config import settings
 from shared.models import RetrievalResult
 
-_model: CrossEncoder | None = None
+_model: "CrossEncoder | None" = None
+_model_lock = Lock()
 
 
-def _get_model() -> CrossEncoder:
+def _get_model() -> "CrossEncoder":
     global _model
     if _model is None:
-        _model = CrossEncoder(settings.reranker_model)
+        from sentence_transformers import CrossEncoder
+
+        with _model_lock:
+            if _model is None:
+                _model = CrossEncoder(settings.reranker_model, revision=settings.reranker_revision)
     return _model
 
 
@@ -34,7 +43,7 @@ def rerank(
 
     scored = [
         result.model_copy(update={"score": float(score)})
-        for result, score in zip(results, scores)
+        for result, score in zip(results, scores, strict=True)
     ]
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored[:top_k]

@@ -1,55 +1,39 @@
-"""Write chunks to Qdrant, Postgres, and raw docs to MinIO.
+"""Recoverable cross-store publication with Postgres as the authority.
 
-Handles both single-document and batch writes. Uses upsert
-semantics so re-ingestion is safe.
+A document is hidden from retrieval while pending/deleting. External writes are
+idempotent and acknowledged before publication. A failed attempt stays visible
+to the ingestion diff so a retry repairs it, even when its hash is unchanged.
 """
 
 import io
-import logging
+import json
+import mimetypes
 
 import psycopg
 from minio import Minio
 from qdrant_client import QdrantClient
-from qdrant_client.models import FilterSelector, FieldCondition, Filter, MatchValue, PointStruct
+from qdrant_client.models import FieldCondition, Filter, FilterSelector, MatchValue, PointStruct
 
 from shared.config import settings
 from shared.models import Chunk
 
-log = logging.getLogger(__name__)
 
-QDRANT_BATCH_SIZE = 100
-
-_UPSERT_CHUNK_SQL = """
-    INSERT INTO chunks (
-        chunk_id, doc_id, content, token_count, chunk_index,
-        parent_chunk_id, section_path, source_path, doc_type,
-        language, metadata, embedding_model
-    ) VALUES (
-        %(chunk_id)s, %(doc_id)s, %(content)s, %(token_count)s, %(chunk_index)s,
-        %(parent_chunk_id)s, %(section_path)s, %(source_path)s, %(doc_type)s,
-        %(language)s, %(metadata)s, %(embedding_model)s
+def bump_revision(conn, corpus_id: str) -> None:
+    conn.execute(
+        "INSERT INTO corpora(corpus_id, revision) VALUES (%s, 1) "
+        "ON CONFLICT(corpus_id) DO UPDATE SET revision=corpora.revision+1",
+        (corpus_id,),
     )
-    ON CONFLICT (chunk_id) DO UPDATE SET
-        content = EXCLUDED.content,
-        token_count = EXCLUDED.token_count,
-        section_path = EXCLUDED.section_path,
-        metadata = EXCLUDED.metadata
-"""
 
-_UPSERT_DOC_SQL = """
-    INSERT INTO documents (
-        doc_id, source_path, doc_type, language, raw_content,
-        metadata, content_hash, embedding_model
-    ) VALUES (
-        %(doc_id)s, %(source_path)s, %(doc_type)s, %(language)s,
-        %(raw_content)s, %(metadata)s, %(content_hash)s, %(embedding_model)s
+
+def _selector(doc_id: str) -> FilterSelector:
+    return FilterSelector(
+        filter=Filter(
+            must=[
+                FieldCondition(key="doc_id", match=MatchValue(value=doc_id)),
+            ]
+        )
     )
-    ON CONFLICT (doc_id) DO UPDATE SET
-        content_hash = EXCLUDED.content_hash,
-        raw_content = EXCLUDED.raw_content,
-        metadata = EXCLUDED.metadata,
-        updated_at = NOW()
-"""
 
 
 def write_document(
@@ -64,93 +48,103 @@ def write_document(
     conn: psycopg.Connection,
     qdrant: QdrantClient,
     minio_client: Minio,
+    *,
+    corpus_id: str = "default",
+    raw_bytes: bytes | None = None,
+    pipeline_version: str = "",
 ) -> None:
-    """Write a single document and its chunks to all stores."""
-    import json
-
-    embedding_model = settings.embedding_model
-
-    # 1. Postgres: upsert document row, delete old chunks, insert new
-    with conn.transaction():
-        conn.execute(
-            _UPSERT_DOC_SQL,
-            {
-                "doc_id": doc_id,
-                "source_path": source_path,
-                "doc_type": doc_type,
-                "language": language,
-                "raw_content": raw_content,
-                "metadata": json.dumps(metadata),
-                "content_hash": content_hash,
-                "embedding_model": embedding_model,
-            },
-        )
-
-        # Delete old chunks for this doc (new ones will be inserted)
-        conn.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
-
-        for chunk in chunks:
-            conn.execute(
-                _UPSERT_CHUNK_SQL,
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "doc_id": chunk.doc_id,
-                    "content": chunk.content,
-                    "token_count": chunk.token_count,
-                    "chunk_index": chunk.chunk_index,
-                    "parent_chunk_id": chunk.parent_chunk_id,
-                    "section_path": chunk.section_path,
-                    "source_path": chunk.source_path,
-                    "doc_type": chunk.doc_type,
-                    "language": chunk.language,
-                    "metadata": json.dumps(chunk.metadata),
-                    "embedding_model": embedding_model,
-                },
-            )
-
-    # 2. Qdrant: delete old points for this doc, upsert new
-    qdrant.delete(
-        collection_name=settings.qdrant_collection,
-        points_selector=FilterSelector(
-            filter=Filter(
-                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
-            )
-        ),
-    )
-
-    points = [
-        PointStruct(
-            id=chunk.chunk_id,
-            vector=chunk.embedding,
-            payload={
-                "doc_id": chunk.doc_id,
-                "content": chunk.content,
-                "source_path": chunk.source_path,
-                "doc_type": chunk.doc_type,
-                "language": chunk.language or "",
-                "section_path": chunk.section_path,
-                "chunk_index": chunk.chunk_index,
-            },
-        )
+    if any(
+        chunk.embedding is None or len(chunk.embedding) != settings.embedding_dim
         for chunk in chunks
-        if chunk.embedding is not None
-    ]
-
-    for i in range(0, len(points), QDRANT_BATCH_SIZE):
-        batch = points[i : i + QDRANT_BATCH_SIZE]
-        qdrant.upsert(collection_name=settings.qdrant_collection, points=batch)
-
-    # 3. MinIO: store raw document
-    data = raw_content.encode("utf-8")
+    ):
+        raise ValueError("Every chunk must have an embedding with the configured dimension")
+    if any(chunk.doc_id != doc_id for chunk in chunks):
+        raise ValueError("Chunk document IDs must match the parent")
+    # Committed pending state is the durable repair record.
+    with conn.transaction():
+        bump_revision(conn, corpus_id)
+        conn.execute(
+            """INSERT INTO documents(doc_id, source_path, doc_type, language, raw_content,
+                metadata, content_hash, embedding_model, corpus_id, sync_status, pipeline_version)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s)
+                ON CONFLICT(doc_id) DO UPDATE SET source_path=EXCLUDED.source_path,
+                doc_type=EXCLUDED.doc_type, language=EXCLUDED.language,
+                raw_content=EXCLUDED.raw_content, metadata=EXCLUDED.metadata,
+                content_hash=EXCLUDED.content_hash, embedding_model=EXCLUDED.embedding_model,
+                sync_status='pending', pipeline_version=EXCLUDED.pipeline_version, updated_at=NOW()""",
+            (
+                doc_id,
+                source_path,
+                doc_type,
+                language,
+                raw_content,
+                json.dumps(metadata),
+                content_hash,
+                settings.embedding_model,
+                corpus_id,
+                pipeline_version,
+            ),
+        )
+        conn.execute("DELETE FROM chunks WHERE doc_id=%s", (doc_id,))
+        if chunks:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO chunks(chunk_id, doc_id, content, token_count, chunk_index,
+                        parent_chunk_id, section_path, source_path, doc_type, language,
+                        metadata, embedding_model, corpus_id)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    [
+                        (
+                            c.chunk_id,
+                            c.doc_id,
+                            c.content,
+                            c.token_count,
+                            c.chunk_index,
+                            c.parent_chunk_id,
+                            c.section_path,
+                            c.source_path,
+                            c.doc_type,
+                            c.language,
+                            json.dumps(c.metadata),
+                            settings.embedding_model,
+                            corpus_id,
+                        )
+                        for c in chunks
+                    ],
+                )
+    qdrant.delete(
+        collection_name=settings.qdrant_collection, points_selector=_selector(doc_id), wait=True
+    )
+    for i in range(0, len(chunks), 100):
+        qdrant.upsert(
+            collection_name=settings.qdrant_collection,
+            wait=True,
+            points=[
+                PointStruct(
+                    id=c.chunk_id,
+                    vector=c.embedding,
+                    payload={
+                        "doc_id": doc_id,
+                        "corpus_id": corpus_id,
+                        "doc_type": doc_type,
+                        "language": language or "",
+                        "source_path": source_path,
+                    },
+                )
+                for c in chunks[i : i + 100]
+            ],
+        )
+    data = raw_bytes if raw_bytes is not None else raw_content.encode("utf-8")
     minio_client.put_object(
         settings.minio_bucket,
-        source_path,
+        f"{corpus_id}/{source_path}",
         io.BytesIO(data),
         len(data),
-        content_type="text/plain",
+        content_type=mimetypes.guess_type(source_path)[0] or "application/octet-stream",
     )
-
-    log.info(f"Wrote {source_path}: {len(chunks)} chunks")
+    with conn.transaction():
+        conn.execute("UPDATE documents SET sync_status='ready' WHERE doc_id=%s", (doc_id,))
+        bump_revision(conn, corpus_id)
 
 
 def delete_document(
@@ -159,28 +153,16 @@ def delete_document(
     conn: psycopg.Connection,
     qdrant: QdrantClient,
     minio_client: Minio,
+    *,
+    corpus_id: str = "default",
 ) -> None:
-    """Remove a document and all its chunks from all stores.
-
-    Postgres delete is transactional (chunks cascade); the Qdrant and MinIO
-    deletes are best-effort afterwards. If one of those fails, the bulk runner
-    logs it and a subsequent re-run reconciles the orphan by doc_id.
-    """
     with conn.transaction():
-        conn.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
-
+        conn.execute("UPDATE documents SET sync_status='deleting' WHERE doc_id=%s", (doc_id,))
+        bump_revision(conn, corpus_id)
     qdrant.delete(
-        collection_name=settings.qdrant_collection,
-        points_selector=FilterSelector(
-            filter=Filter(
-                must=[FieldCondition(key="doc_id", match=MatchValue(value=doc_id))]
-            )
-        ),
+        collection_name=settings.qdrant_collection, points_selector=_selector(doc_id), wait=True
     )
-
-    try:
-        minio_client.remove_object(settings.minio_bucket, source_path)
-    except Exception:
-        log.warning(f"Could not delete {source_path} from MinIO (may not exist)")
-
-    log.info(f"Deleted {source_path}")
+    minio_client.remove_object(settings.minio_bucket, f"{corpus_id}/{source_path}")
+    with conn.transaction():
+        conn.execute("DELETE FROM documents WHERE doc_id=%s", (doc_id,))
+        bump_revision(conn, corpus_id)

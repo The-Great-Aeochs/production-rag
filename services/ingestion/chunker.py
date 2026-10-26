@@ -5,7 +5,6 @@ token range, with overlap for context continuity and parent-child
 relationships for hierarchical retrieval.
 """
 
-import hashlib
 import uuid
 
 import tiktoken
@@ -13,7 +12,14 @@ import tiktoken
 from shared.config import settings
 from shared.models import Chunk, Section
 
-_enc = tiktoken.get_encoding("cl100k_base")
+_enc = None
+
+
+def _encoding():
+    global _enc
+    if _enc is None:
+        _enc = tiktoken.get_encoding("cl100k_base")
+    return _enc
 
 
 _NAMESPACE = uuid.UUID("a3f1b2c4-d5e6-7890-abcd-ef1234567890")
@@ -25,7 +31,7 @@ def _make_id(key: str) -> str:
 
 
 def count_tokens(text: str) -> int:
-    return len(_enc.encode(text))
+    return len(_encoding().encode(text))
 
 
 def chunk_sections(
@@ -34,9 +40,10 @@ def chunk_sections(
     doc_type: str,
     language: str | None = None,
     metadata: dict | None = None,
+    identity: str | None = None,
 ) -> list[Chunk]:
     """Convert parsed sections into chunks with overlap and hierarchy."""
-    doc_id = _make_id(source_path)
+    doc_id = _make_id(identity or source_path)
     meta = metadata or {}
 
     raw_chunks: list[dict] = []
@@ -64,7 +71,7 @@ def chunk_sections(
 
     # Build final Chunk objects with overlap and parent tracking
     chunks = _build_chunks(
-        merged, doc_id, source_path, doc_type, language, meta
+        merged, doc_id, source_path, doc_type, language, meta, identity or source_path
     )
     return chunks
 
@@ -139,6 +146,7 @@ def _build_chunks(
     doc_type: str,
     language: str | None,
     metadata: dict,
+    identity: str,
 ) -> list[Chunk]:
     """Assign IDs, overlap, section_path, and parent references."""
     chunks: list[Chunk] = []
@@ -161,17 +169,17 @@ def _build_chunks(
         content = raw["content"]
         if i > 0 and overlap_tokens > 0:
             prev_text = raw_chunks[i - 1]["content"]
-            prev_tokens = _enc.encode(prev_text)
-            overlap_text = _enc.decode(prev_tokens[-overlap_tokens:])
+            prev_tokens = _encoding().encode(prev_text)
+            overlap_text = _encoding().decode(prev_tokens[-overlap_tokens:])
             content = overlap_text + "\n\n" + content
 
-        chunk_id = _make_id(f"{source_path}:{i}")
+        chunk_id = _make_id(f"{identity}:{i}")
         token_count = count_tokens(content)
 
         # Parent is the previous chunk at a higher level (lower number)
         parent_id = None
         if i > 0 and raw_chunks[i - 1]["level"] < level:
-            parent_id = _make_id(f"{source_path}:{i - 1}")
+            parent_id = _make_id(f"{identity}:{i - 1}")
 
         chunks.append(
             Chunk(
