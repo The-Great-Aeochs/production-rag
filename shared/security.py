@@ -35,7 +35,7 @@ def authenticate(token: str) -> Principal:
         raise HTTPException(503, "API authentication is not configured")
     for key, corpus in settings.api_keys.items():
         if secrets.compare_digest(token.encode(), key.encode()):
-            return Principal(hashlib.sha256(key.encode()).hexdigest(), corpus)
+            return Principal(hashlib.sha256(f"{corpus}:{key}".encode()).hexdigest(), corpus)
     raise HTTPException(401, "Invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
 
 

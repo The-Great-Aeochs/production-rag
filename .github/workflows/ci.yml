@@ -1,6 +1,7 @@
 name: CI
 on:
   push:
+    branches: [main]
   pull_request:
 permissions:
   contents: read
@@ -51,4 +52,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: docker build --tag production-rag:ci .
-      - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("002_recoverable_ingestion.sql").is_file()'
+      - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from sentence_transformers import SentenceTransformer, CrossEncoder; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("002_recoverable_ingestion.sql").is_file()'

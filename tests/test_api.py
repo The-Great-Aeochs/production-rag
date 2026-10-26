@@ -194,3 +194,12 @@ def test_stream_disconnect_releases_admission_even_if_headers_fail(monkeypatch, 
     asyncio.run(invoke())
     assert slots.acquire(blocking=False)
     slots.release()
+
+
+def test_reassigning_a_token_to_another_corpus_revokes_old_sessions(client, auth, monkeypatch):
+    from .conftest import TOKEN_A
+
+    sid = client.post("/session", headers=auth).json()["session_id"]
+    monkeypatch.setattr(settings, "api_keys", {TOKEN_A: "beta"})
+    response = client.post("/query", headers=auth, json={"query": "q", "session_id": sid})
+    assert response.status_code == 404
