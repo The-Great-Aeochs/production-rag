@@ -5,8 +5,6 @@ import "@fontsource/manrope/400.css";
 import "@fontsource/manrope/500.css";
 import "@fontsource/manrope/600.css";
 import "@fontsource/manrope/700.css";
-import "@fontsource/instrument-serif/400.css";
-import "@fontsource/instrument-serif/400-italic.css";
 import "./globals.css";
 export const metadata: Metadata = {
   metadataBase: new URL(
@@ -16,11 +14,11 @@ export const metadata: Metadata = {
         : "http://localhost:3000"),
   ),
   title: {
-    default: "Production RAG — Answers with a paper trail.",
+    default: "Production RAG — Document search",
     template: "%s — Production RAG",
   },
   description:
-    "Explore a framework-free retrieval system with hybrid search, cited answers, durable ingestion, and workspace access control.",
+    "Search technical documentation with hybrid retrieval, source citations, and workspace permissions.",
 };
 export default function RootLayout({
   children,
@@ -41,7 +39,7 @@ export default function RootLayout({
     </>
   );
   return (
-    <html lang="en" data-scroll-behavior="smooth">
+    <html lang="en">
       <body>
         {authEnabled ? <ClerkProvider>{content}</ClerkProvider> : content}
       </body>

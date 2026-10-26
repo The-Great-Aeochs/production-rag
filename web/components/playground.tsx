@@ -1,180 +1,123 @@
 "use client";
 import { useState, type FormEvent } from "react";
-import {
-  ArrowUp,
-  ArrowUpRight,
-  BookOpen,
-  Check,
-  ChevronRight,
-  LoaderCircle,
-  RotateCcw,
-  Sparkles,
-} from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import { LoaderCircle } from "lucide-react";
 import { examples } from "@/lib/samples";
 import type { Source } from "@/lib/sse";
+import { AnswerMarkdown, Sources } from "@/components/answer";
+import { responseError } from "@/lib/api-client";
 
+type Answer = {
+  question: string;
+  answer: string;
+  sources: Source[];
+  live: boolean;
+};
+function sampleAnswer(index: number): Answer {
+  const sample = examples[index];
+  return {
+    question: sample.question,
+    answer: sample.answer,
+    sources: [
+      {
+        source_path: sample.source,
+        section_path: [sample.section],
+        content: sample.excerpt,
+      },
+    ],
+    live: false,
+  };
+}
 export function Playground({
   liveAvailable = false,
 }: {
   liveAvailable?: boolean;
 }) {
   const [selected, setSelected] = useState(0);
-  const [question, setQuestion] = useState(examples[0].question);
-  const [answeredQuestion, setAnsweredQuestion] = useState(
-    examples[0].question,
-  );
-  const [answer, setAnswer] = useState(examples[0].answer);
-  const [sources, setSources] = useState<Source[]>([
-    {
-      source_path: examples[0].source,
-      section_path: [examples[0].section],
-      content: examples[0].excerpt,
-    },
-  ]);
-  const [mode, setMode] = useState<"guided" | "live">("guided");
+  const [result, setResult] = useState(() => sampleAnswer(0));
+  const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [expanded, setExpanded] = useState(false);
   function choose(index: number) {
     setSelected(index);
-    setQuestion(examples[index].question);
-    setAnswer(examples[index].answer);
-    setAnsweredQuestion(examples[index].question);
-    setSources([
-      {
-        source_path: examples[index].source,
-        section_path: [examples[index].section],
-        content: examples[index].excerpt,
-      },
-    ]);
-    setMode("guided");
+    setResult(sampleAnswer(index));
     setError("");
-    setExpanded(false);
   }
   async function ask(event: FormEvent) {
     event.preventDefault();
-    if (loading || !question.trim()) return;
+    if (!liveAvailable || loading || !question.trim()) return;
+    const submittedQuestion = question.trim();
     setError("");
     setLoading(true);
-    const submittedQuestion = question;
     try {
       const response = await fetch("/api/demo", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: question }),
+        body: JSON.stringify({ query: submittedQuestion }),
       });
-      const data = await response.json();
       if (!response.ok)
-        throw new Error(
-          typeof data.detail === "string"
-            ? data.detail
-            : "Live answers are temporarily unavailable",
+        throw await responseError(
+          response,
+          "Could not get an answer. Try again.",
         );
-      setAnswer(data.answer);
-      setAnsweredQuestion(submittedQuestion);
-      setSources(data.sources || []);
-      setMode("live");
-      setExpanded(false);
+      const data = await response.json();
+      setResult({
+        question: submittedQuestion,
+        answer: data.answer,
+        sources: data.sources || [],
+        live: true,
+      });
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Please try again");
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Could not get an answer. Try again.",
+      );
     } finally {
       setLoading(false);
     }
   }
   return (
-    <div className="playground" aria-busy={loading}>
-      <div className="playground-top">
-        <span>
-          <span className="small-grid" /> THE PLAYGROUND
-        </span>
-        <span className="mode-badge">
-          <span
-            className={mode === "live" ? "status-dot live" : "status-dot"}
+    <div className="playground">
+      <aside className="example-rail" aria-label="Sample questions">
+        <h3>Sample questions</h3>
+        {examples.map((example, index) => (
+          <button
+            key={example.source}
+            type="button"
+            className="example"
+            aria-pressed={!result.live && selected === index}
+            onClick={() => choose(index)}
+            disabled={loading}
+          >
+            {example.question}
+          </button>
+        ))}
+        <p>
+          These sample answers are prewritten. Open a source to check the
+          supporting text.
+        </p>
+      </aside>
+      <div className="answer-pane">
+        <div className="answer-result" aria-busy={loading}>
+          <p className="answer-kind">
+            {result.live ? "Live response" : "Sample answer"}
+          </p>
+          <h3>{result.question}</h3>
+          <AnswerMarkdown>{result.answer}</AnswerMarkdown>
+          <Sources
+            key={`${result.question}-${result.live}`}
+            sources={result.sources}
           />
-          {mode === "live" ? "Live response" : "Guided example"}
-        </span>
-      </div>
-      <div className="playground-grid">
-        <aside className="example-rail">
-          <div className="rail-label">A FEW GOOD QUESTIONS</div>
-          {examples.map((example, index) => (
-            <button
-              key={example.source}
-              type="button"
-              onClick={() => choose(index)}
-              className={selected === index ? "example active" : "example"}
-              disabled={loading}
-            >
-              <span className="example-number">0{index + 1}</span>
-              {example.question}
-              <ChevronRight size={15} />
-            </button>
-          ))}
-          <div className="rail-note">
-            <BookOpen size={17} />
-            <p>
-              A curated corpus about this project. No private workspace data.
+          {result.live && (
+            <p className="technical-note">
+              Generated from public documentation. Check the sources before
+              using the answer.
             </p>
-          </div>
-        </aside>
-        <div className="answer-pane">
-          <div className="answer-question">
-            <span className="avatar user-avatar">Q</span>
-            <h3>{answeredQuestion}</h3>
-          </div>
-          <div className="answer-body">
-            <div className="answer-label">
-              <span className="avatar ai-avatar">
-                <Sparkles size={15} />
-              </span>
-              <span>PRODUCTION RAG</span>
-              <span className="answer-complete">
-                <Check size={13} />{" "}
-                {mode === "guided" ? "Illustrative" : "Complete"}
-              </span>
-            </div>
-            <div className="markdown">
-              <ReactMarkdown skipHtml components={{ img: () => null }}>
-                {answer}
-              </ReactMarkdown>
-            </div>
-            {sources.length > 0 && (
-              <div className="source-list">
-                {sources.map((source, index) => (
-                  <button
-                    type="button"
-                    className="source-chip"
-                    onClick={() => setExpanded(!expanded)}
-                    aria-expanded={expanded}
-                    key={source.source_path + index}
-                  >
-                    <span>{index + 1}</span>
-                    <BookOpen size={13} />
-                    {source.source_path}
-                    <ArrowUpRight size={12} />
-                  </button>
-                ))}
-              </div>
-            )}
-            {expanded && (
-              <div className="source-preview">
-                {sources.map((source, index) => (
-                  <div key={index}>
-                    <strong>{source.source_path}</strong>
-                    <p>{source.content || "Source excerpt is unavailable."}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-            <p className="answer-footnote">
-              {mode === "guided"
-                ? "This is a prewritten walkthrough, not a live model response."
-                : "Generated from the public corpus. Check the cited sources."}
-            </p>
-          </div>
+          )}
+        </div>
+        {liveAvailable ? (
           <form className="ask-form" onSubmit={ask}>
-            <label htmlFor="demo-question" className="sr-only">
+            <label htmlFor="demo-question">
               Ask a question about the project
             </label>
             <textarea
@@ -183,43 +126,44 @@ export function Playground({
               maxLength={1000}
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder="Ask a question about the project…"
               disabled={loading}
+              aria-describedby="demo-help"
             />
             <div className="ask-form-bottom">
-              <span>
-                {liveAvailable
-                  ? "Public demo · shared daily quota"
-                  : "Explore examples, or check live availability"}
+              <span id="demo-help">
+                Public demo. Shared daily request limit.
               </span>
               <button
                 type="submit"
-                className="ask-submit"
-                aria-label="Ask live question"
+                className="button primary"
                 disabled={loading || !question.trim()}
               >
                 {loading ? (
-                  <LoaderCircle size={18} className="spin" />
+                  <>
+                    <LoaderCircle
+                      size={15}
+                      className="spin"
+                      aria-hidden="true"
+                    />{" "}
+                    Getting answer…
+                  </>
                 ) : (
-                  <ArrowUp size={19} />
+                  "Ask question"
                 )}
               </button>
             </div>
+            {error && (
+              <p className="inline-error" role="alert">
+                {error}
+              </p>
+            )}
           </form>
-          {error && (
-            <div className="inline-error" role="alert">
-              {error}
-            </div>
-          )}
-          <button
-            className="reset-example"
-            onClick={() => choose(selected)}
-            type="button"
-            disabled={loading}
-          >
-            <RotateCcw size={12} /> Reset example
-          </button>
-        </div>
+        ) : (
+          <p className="demo-unavailable" role="status">
+            Live questions are unavailable on this deployment. You can browse
+            the sample questions and their sources.
+          </p>
+        )}
       </div>
     </div>
   );

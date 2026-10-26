@@ -2,24 +2,55 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { Playground } from "@/components/playground";
 afterEach(() => vi.unstubAllGlobals());
-describe("public playground", () => {
-  it("labels guided answers and exposes their source excerpt", () => {
-    render(<Playground />);
-    expect(screen.getByText("Guided example")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /retrieval.md/ }));
-    expect(screen.getByText(/Both backends enforce/)).toBeInTheDocument();
+function submitQuestion(question = "How are documents scoped?") {
+  fireEvent.change(screen.getByLabelText("Ask a question about the project"), {
+    target: { value: question },
   });
-  it("switches the guided context when another question is selected", () => {
+  fireEvent.click(screen.getByRole("button", { name: "Ask question" }));
+}
+describe("public demo", () => {
+  it("labels prewritten answers and exposes the source through an accessible disclosure", () => {
     render(<Playground />);
-    fireEvent.click(
-      screen.getByRole("button", { name: /What happens if an ingestion/ }),
-    );
-    expect(screen.getByText(/Jobs remain in Postgres/)).toBeInTheDocument();
+    expect(screen.getByText("Sample answer")).toBeInTheDocument();
+    const source = screen.getByRole("button", {
+      name: /View source: retrieval.md/,
+    });
+    expect(source).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(source);
+    expect(source).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/Both backends enforce/)).toBeVisible();
+    fireEvent.click(source);
+    expect(screen.getByText(/Both backends enforce/)).not.toBeVisible();
+  });
+  it("updates the answer and selected question together", () => {
+    render(<Playground />);
+    const question = screen.getByRole("button", {
+      name: /What happens if an ingestion/,
+    });
+    fireEvent.click(question);
+    expect(question).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText(/Jobs remain in Postgres/)).toBeVisible();
     expect(
-      screen.getByLabelText("Ask a question about the project"),
-    ).toHaveValue("What happens if an ingestion worker crashes?");
+      screen.getByRole("heading", {
+        name: "What happens if an ingestion worker crashes?",
+      }),
+    ).toBeInTheDocument();
   });
-  it("keeps examples available when live inference is disconnected", async () => {
+  it("does not offer a failing form when live questions are not configured", () => {
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    render(<Playground />);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Live questions are unavailable",
+    );
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Can cached answers/ }));
+    expect(
+      screen.getByText(/Conversation answers are not stored/),
+    ).toBeVisible();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("keeps the sample available after an unavailable live request", async () => {
     vi.stubGlobal(
       "fetch",
       vi
@@ -31,12 +62,12 @@ describe("public playground", () => {
           ),
         ),
     );
-    render(<Playground />);
-    fireEvent.click(screen.getByRole("button", { name: "Ask live question" }));
+    render(<Playground liveAvailable />);
+    submitQuestion();
     expect(await screen.findByRole("alert")).toHaveTextContent("not connected");
-    expect(screen.getByText("Guided example")).toBeInTheDocument();
+    expect(screen.getByText("Sample answer")).toBeInTheDocument();
   });
-  it("labels real responses separately and never renders raw model HTML", async () => {
+  it("labels a live answer and blocks model HTML and remote images", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -48,8 +79,15 @@ describe("public playground", () => {
       ),
     );
     const { container } = render(<Playground liveAvailable />);
-    fireEvent.click(screen.getByRole("button", { name: "Ask live question" }));
+    submitQuestion("What is a workspace?");
     expect(await screen.findByText("Live response")).toBeInTheDocument();
     expect(container.querySelector("img")).toBeNull();
+    fireEvent.change(
+      screen.getByLabelText("Ask a question about the project"),
+      { target: { value: "An unsubmitted question" } },
+    );
+    expect(
+      screen.getByRole("heading", { name: "What is a workspace?" }),
+    ).toBeInTheDocument();
   });
 });

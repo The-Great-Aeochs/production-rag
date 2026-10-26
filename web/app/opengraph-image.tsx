@@ -1,5 +1,5 @@
 import { ImageResponse } from "next/og";
-export const alt = "Production RAG — Answers with a paper trail.";
+export const alt = "Production RAG — Document search";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 export default function Image() {
@@ -30,13 +30,13 @@ export default function Image() {
           display: "flex",
           flexDirection: "column",
           marginTop: 75,
-          fontSize: 82,
-          letterSpacing: -4,
+          fontSize: 68,
+          letterSpacing: -2,
           lineHeight: 1.08,
         }}
       >
-        <span>Answers with</span>
-        <span style={{ color: "#d75c35" }}>a paper trail.</span>
+        <span>Document search</span>
+        <span style={{ color: "#d75c35" }}>with cited answers.</span>
       </div>
       <div
         style={{

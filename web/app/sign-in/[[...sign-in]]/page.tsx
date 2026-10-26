@@ -9,13 +9,13 @@ export default function SignInPage() {
         <SignIn />
       ) : (
         <div className="notice-panel">
-          <h2>Sign-in isn’t available yet.</h2>
+          <h2>Sign-in is unavailable</h2>
           <p>
-            The public playground is open while workspace login is being
-            configured.
+            Login has not been configured for this deployment. The public demo
+            is available.
           </p>
           <Link className="button secondary" href="/#demo">
-            Explore the playground
+            View the demo
           </Link>
         </div>
       )}
