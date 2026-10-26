@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70 AS builder
+FROM python:3.15-slim-bookworm@sha256:575f8bc12ec26542e0678bc6b60e385218248019d433157ec327264a78c3a853 AS builder
 WORKDIR /app
 RUN python -m pip install --no-cache-dir uv==0.11.2
 COPY pyproject.toml uv.lock ./
@@ -10,7 +10,7 @@ COPY prompts prompts
 COPY migrations migrations
 RUN uv sync --locked --extra models --no-dev --no-editable
 
-FROM python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
+FROM python:3.15-slim-bookworm@sha256:575f8bc12ec26542e0678bc6b60e385218248019d433157ec327264a78c3a853
 RUN useradd --uid 10001 --create-home rag && mkdir /models /documents && chown rag:rag /models /documents
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
