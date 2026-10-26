@@ -5,6 +5,7 @@ then calls Ollama for completion. Supports both full and streaming responses.
 No LLM framework — plain HTTP calls.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -33,11 +34,15 @@ def _get_system_prompt() -> str:
 def _build_context(chunks: list[RetrievalResult]) -> str:
     """Format retrieved chunks as numbered context sections."""
     parts = []
+    remaining = settings.context_max_chars
     for i, chunk in enumerate(chunks, 1):
         section = " > ".join(chunk.section_path) if chunk.section_path else "general"
-        parts.append(
-            f"[Context {i}] Source: {chunk.source_path}#{section}\n{chunk.content}"
-        )
+        header = f"[Context {i}] Source: {chunk.source_path}#{section}\n"
+        if remaining <= len(header):
+            break
+        part = header + chunk.content[: remaining - len(header)]
+        parts.append(part)
+        remaining -= len(part) + 7
     return "\n\n---\n\n".join(parts)
 
 
@@ -61,10 +66,12 @@ def _build_messages(
     if history:
         # Add summary as a system-level context note if available
         if summary:
-            messages.append({
-                "role": "system",
-                "content": f"Conversation summary so far:\n{summary}",
-            })
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"Conversation summary so far:\n{summary}",
+                }
+            )
         # Add recent exchanges (truncate long assistant responses)
         for msg in history:
             content = msg.content
@@ -73,10 +80,12 @@ def _build_messages(
             messages.append({"role": msg.role, "content": content})
 
     # Current turn with retrieved context
-    messages.append({
-        "role": "user",
-        "content": f"/nothink\nContext:\n{context}\n\nQuestion: {query}",
-    })
+    messages.append(
+        {
+            "role": "user",
+            "content": f"/nothink\nContext:\n{context}\n\nQuestion: {query}",
+        }
+    )
     return messages
 
 
@@ -94,13 +103,16 @@ def generate(
     """Generate a full response from Ollama (non-streaming)."""
     messages = _build_messages(query, chunks, history, summary)
 
-    with httpx.Client(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
+    with httpx.Client(
+        timeout=httpx.Timeout(settings.generation_timeout_s, connect=settings.dependency_timeout_s)
+    ) as client:
         resp = client.post(
             f"{settings.ollama_url}/api/chat",
             json={
                 "model": settings.ollama_model,
                 "messages": messages,
                 "stream": False,
+                "options": {"num_predict": settings.generation_max_tokens},
             },
         )
         resp.raise_for_status()
@@ -116,39 +128,74 @@ async def generate_stream(
     """Stream response tokens from Ollama."""
     messages = _build_messages(query, chunks, history, summary)
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
-        async with client.stream(
-            "POST",
-            f"{settings.ollama_url}/api/chat",
-            json={
-                "model": settings.ollama_model,
-                "messages": messages,
-                "stream": True,
-            },
-        ) as resp:
-            resp.raise_for_status()
-            buffer = ""
-            in_think = False
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                data = json.loads(line)
-                token = data.get("message", {}).get("content", "")
-                if token:
-                    buffer += token
-                    # Skip everything inside <think>...</think>
-                    if "<think>" in buffer and not in_think:
-                        in_think = True
-                    if in_think:
-                        if "</think>" in buffer:
-                            # Strip the think block and emit remainder
-                            buffer = re.sub(r"<think>[\s\S]*?</think>\s*", "", buffer)
-                            in_think = False
-                            if buffer:
-                                yield buffer
-                                buffer = ""
+    async with asyncio.timeout(settings.generation_timeout_s):
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                settings.generation_timeout_s,
+                connect=settings.dependency_timeout_s,
+            )
+        ) as client:
+            async with client.stream(
+                "POST",
+                f"{settings.ollama_url}/api/chat",
+                json={
+                    "model": settings.ollama_model,
+                    "messages": messages,
+                    "stream": True,
+                    "options": {"num_predict": settings.generation_max_tokens},
+                },
+            ) as resp:
+                resp.raise_for_status()
+                sanitizer = ThinkFilter()
+                async for line in resp.aiter_lines():
+                    if not line:
                         continue
-                    yield token
-                    buffer = ""
-                if data.get("done"):
-                    break
+                    data = json.loads(line)
+                    if data.get("error"):
+                        raise RuntimeError("Inference service returned a streaming error")
+                    token = sanitizer.feed(data.get("message", {}).get("content", ""))
+                    if token:
+                        yield token
+                    if data.get("done"):
+                        tail = sanitizer.finish()
+                        if tail:
+                            yield tail
+                        return
+                raise RuntimeError("Inference stream ended without completion")
+
+
+class ThinkFilter:
+    """Remove reasoning tags even when tags are split across network tokens."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.hidden = False
+
+    def feed(self, token: str) -> str:
+        self.buffer += token
+        output = []
+        while self.buffer:
+            marker = "</think>" if self.hidden else "<think>"
+            position = self.buffer.find(marker)
+            if position >= 0:
+                if not self.hidden:
+                    output.append(self.buffer[:position])
+                self.buffer = self.buffer[position + len(marker) :]
+                self.hidden = not self.hidden
+                continue
+            # Retain the longest suffix that could begin a split marker.
+            keep = 0
+            for size in range(1, min(len(marker), len(self.buffer) + 1)):
+                if self.buffer.endswith(marker[:size]):
+                    keep = size
+            safe = self.buffer[:-keep] if keep else self.buffer
+            if not self.hidden:
+                output.append(safe)
+            self.buffer = self.buffer[-keep:] if keep else ""
+            break
+        return "".join(output)
+
+    def finish(self) -> str:
+        # Drop incomplete tag prefixes to avoid leaking a partial <think>.
+        self.buffer = ""
+        return ""

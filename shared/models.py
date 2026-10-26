@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from shared.filters import validate_filters
 
 
 class Section(BaseModel):
@@ -50,12 +52,29 @@ class ConversationMessage(BaseModel):
 class QueryRequest(BaseModel):
     """Input to the query pipeline."""
 
-    query: str
-    session_id: str | None = None  # None = single-turn (no history)
-    filters: dict | None = None
-    top_k: int = 5
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{32}$"
+    )  # None = single-turn (no history)
+    filters: dict[str, str] | None = None
+    top_k: int = Field(default=5, ge=1, le=30)
     use_cache: bool = True
     stream: bool = False
+
+    @field_validator("query")
+    @classmethod
+    def nonblank_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Query cannot be blank")
+        return value
+
+    @field_validator("filters")
+    @classmethod
+    def known_filters(cls, value):
+        validate_filters(value)
+        return value
 
 
 class RetrievalResult(BaseModel):
@@ -89,7 +108,9 @@ class EvalCase(BaseModel):
     expected_answer: str
     expected_sources: list[str] = Field(default_factory=list)  # file paths
     tags: list[str] = Field(default_factory=list)
-    category: str = "factual"  # factual | code_search | conceptual | multi_hop | negative | ambiguous
+    category: str = (
+        "factual"  # factual | code_search | conceptual | multi_hop | negative | ambiguous
+    )
     difficulty: str = "medium"  # easy | medium | hard
     expected_behavior: str = "answer"  # answer | refuse | clarify
     filters: dict | None = None

@@ -10,17 +10,15 @@ Results are stored as JSON in services/eval/results/ for comparison.
 
 import json
 import logging
+import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
 from qdrant_client import QdrantClient
 
-from shared.config import settings
-from shared.db import get_pg_conn, get_qdrant
-from shared.models import EvalCase, EvalResult, QueryRequest, RetrievalResult
 from services.eval.judges import LLMJudge
 from services.eval.metrics import (
     aggregate_by_category,
@@ -34,24 +32,30 @@ from services.ingestion.embedder import embed_query
 from services.query.generator import generate
 from services.query.reranker import rerank
 from services.query.retriever import keyword_search, reciprocal_rank_fusion, semantic_search
+from shared.config import settings
+from shared.db import get_pg_conn, get_qdrant
+from shared.models import EvalCase, EvalResult
 
 log = logging.getLogger(__name__)
 
-RESULTS_DIR = Path(__file__).parent / "results"
-RESULTS_DIR.mkdir(exist_ok=True)
+RESULTS_DIR = Path(os.environ.get("EVAL_RESULTS_DIR", "eval_results"))
 
 
 def load_test_set(path: str | Path) -> list[EvalCase]:
     """Load test cases from JSON file."""
     data = json.loads(Path(path).read_text())
-    return [EvalCase(**case) for case in data]
+    cases = [EvalCase(**case) for case in data]
+    if not cases or len({case.id for case in cases}) != len(cases):
+        raise ValueError("Evaluation requires nonempty cases with unique IDs")
+    return cases
 
 
 def _get_git_commit() -> str:
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         return "unknown"
@@ -61,7 +65,8 @@ def _get_git_branch() -> str:
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            text=True, stderr=subprocess.DEVNULL,
+            text=True,
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         return "unknown"
@@ -82,7 +87,7 @@ def eval_retrieval(
         t0 = time.time()
         query_embedding = embed_query(case.question)
 
-        semantic_results = semantic_search(query_embedding, qdrant, case.filters)
+        semantic_results = semantic_search(query_embedding, qdrant, case.filters, conn=conn)
         keyword_results = keyword_search(case.question, conn, case.filters)
         merged = reciprocal_rank_fusion(semantic_results, keyword_results)
         top_chunks = rerank(case.question, merged, top_k)
@@ -90,14 +95,16 @@ def eval_retrieval(
         retrieved_sources = [c.source_path for c in top_chunks]
         elapsed = (time.time() - t0) * 1000
 
-        results.append(EvalResult(
-            case_id=case.id,
-            hit=hit_at_k(retrieved_sources, case.expected_sources),
-            reciprocal_rank=reciprocal_rank(retrieved_sources, case.expected_sources),
-            precision_at_k=precision_at_k(retrieved_sources, case.expected_sources),
-            retrieved_sources=retrieved_sources,
-            latency_ms=elapsed,
-        ))
+        results.append(
+            EvalResult(
+                case_id=case.id,
+                hit=hit_at_k(retrieved_sources, case.expected_sources),
+                reciprocal_rank=reciprocal_rank(retrieved_sources, case.expected_sources),
+                precision_at_k=precision_at_k(retrieved_sources, case.expected_sources),
+                retrieved_sources=retrieved_sources,
+                latency_ms=elapsed,
+            )
+        )
 
         log.info(
             f"[{case.id}] hit={results[-1].hit} rr={results[-1].reciprocal_rank:.2f} "
@@ -120,12 +127,12 @@ def eval_e2e(
     """Full end-to-end eval: retrieve + generate + judge."""
     results = []
     for i, case in enumerate(cases):
-        log.info(f"[{i+1}/{len(cases)}] Evaluating: {case.question[:60]}...")
+        log.info(f"[{i + 1}/{len(cases)}] Evaluating: {case.question[:60]}...")
         t0 = time.time()
 
         # Retrieve
         query_embedding = embed_query(case.question)
-        semantic_results = semantic_search(query_embedding, qdrant, case.filters)
+        semantic_results = semantic_search(query_embedding, qdrant, case.filters, conn=conn)
         keyword_results = keyword_search(case.question, conn, case.filters)
         merged = reciprocal_rank_fusion(semantic_results, keyword_results)
         top_chunks = rerank(case.question, merged, top_k)
@@ -218,14 +225,15 @@ def run_eval(
         raise ValueError(f"Unknown mode: {mode}")
 
     conn.close()
+    qdrant.close()
 
     # Build case lookup for per-category aggregation
     case_lookup = {c.id: {"category": c.category, "difficulty": c.difficulty} for c in cases}
 
-    run_id = f"eval-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    run_id = f"eval-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}"
     output = {
         "run_id": run_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "git_commit": _get_git_commit(),
         "git_branch": _get_git_branch(),
         "test_set": str(test_set_path),
@@ -244,6 +252,7 @@ def run_eval(
     }
 
     # Store results
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     result_path = RESULTS_DIR / f"{run_id}.json"
     result_path.write_text(json.dumps(output, indent=2, default=str))
     log.info(f"Results saved to {result_path}")
@@ -254,11 +263,11 @@ def run_eval(
 def print_summary(output: dict) -> None:
     """Print a human-readable summary table."""
     s = output["summary"]
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  EVAL RUN: {output['run_id']}")
     print(f"  {output['timestamp']}  |  {output['git_commit']}")
     print(f"  Mode: {output['mode']}  |  Cases: {s.get('total_cases', 0)}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     targets = {
         "hit_rate_at_k": 0.85,
@@ -270,7 +279,7 @@ def print_summary(output: dict) -> None:
     }
 
     print(f"  {'Metric':<25} {'Value':>10} {'Target':>10} {'Status':>8}")
-    print(f"  {'-'*53}")
+    print(f"  {'-' * 53}")
 
     for metric, value in s.items():
         if metric == "total_cases":
@@ -289,7 +298,7 @@ def print_summary(output: dict) -> None:
 
     # Per-category
     if output.get("per_category"):
-        print(f"\n  Per-Category Hit Rate:")
+        print("\n  Per-Category Hit Rate:")
         for cat, metrics in output["per_category"].items():
             hr = metrics.get("hit_rate_at_k", 0)
             n = metrics.get("total_cases", 0)

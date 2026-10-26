@@ -1,151 +1,144 @@
-"""Query endpoints: full RAG pipeline, streaming, and session management."""
+"""Authenticated RAG routes; blocking preparation runs in FastAPI's threadpool."""
 
 import json
 import logging
+import threading
+from collections.abc import Iterator
+from typing import Annotated
 
-from fastapi import APIRouter, Request
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
-from shared.config import settings
-from shared.models import ConversationMessage, QueryRequest, QueryResponse
-from services.ingestion.embedder import embed_query
-from services.query.generator import PROMPT_VERSION, generate_stream
+from services.query.generator import generate_stream
 from services.query.pipeline import (
-    _count_tokens_approx,
-    _safe_cache_get,
-    _safe_cache_set,
-    _safe_log_query,
-    retrieve_and_rerank,
+    NO_RESULTS,
+    complete_query,
+    prepare_query,
+    release_query,
     run_query,
 )
-from services.query.rewriter import rewrite_query
-from services.query.session import (
-    add_message,
-    create_session,
-    get_recent_messages,
-    get_summary,
-    session_exists,
-)
+from services.query.session import create_session
+from shared.config import settings
+from shared.models import QueryRequest, QueryResponse
+from shared.security import Principal, require_principal
 
 log = logging.getLogger(__name__)
-
 router = APIRouter(tags=["query"])
+_slots = threading.BoundedSemaphore(settings.max_concurrent_queries)
+
+
+def query_slot() -> Iterator[None]:
+    if not _slots.acquire(blocking=False):
+        raise HTTPException(503, "Query capacity exceeded", headers={"Retry-After": "1"})
+    try:
+        yield
+    finally:
+        _slots.release()
+
+
+def scoped_request(req: QueryRequest, principal: Principal) -> QueryRequest:
+    filters = dict(req.filters or {})
+    if "corpus_id" in filters and filters["corpus_id"] != principal.corpus_id:
+        raise HTTPException(403, "Corpus access denied")
+    filters["corpus_id"] = principal.corpus_id
+    return req.model_copy(update={"filters": filters})
 
 
 @router.post("/session", status_code=201)
-def create_session_endpoint(request: Request):
-    """Create a new conversation session."""
-    session_id = create_session(request.app.state.redis)
-    return {"session_id": session_id}
+def create_session_endpoint(
+    request: Request, principal: Annotated[Principal, Depends(require_principal)]
+):
+    return {"session_id": create_session(request.app.state.redis, principal.owner)}
 
 
-@router.post("/query", response_model=QueryResponse)
-def query_endpoint(req: QueryRequest, request: Request):
-    """Full RAG pipeline: retrieve -> rerank -> generate.
+@router.post("/query", response_model=QueryResponse, dependencies=[Depends(query_slot)])
+def query_endpoint(
+    req: QueryRequest, request: Request, principal: Annotated[Principal, Depends(require_principal)]
+):
+    if req.stream:
+        raise HTTPException(422, "Use /query/stream for streaming")
+    try:
+        return run_query(
+            scoped_request(req, principal),
+            request.app.state.pg_pool,
+            request.app.state.qdrant,
+            request.app.state.redis,
+            principal.owner,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "Generation is temporarily unavailable") from exc
 
-    Pass session_id for multi-turn conversations. Omit for single-turn.
-    """
-    return run_query(
-        req,
-        pool=request.app.state.pg_pool,
-        qdrant=request.app.state.qdrant,
-        redis_client=request.app.state.redis,
-    )
+
+def _event(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @router.post("/query/stream")
-async def query_stream_endpoint(req: QueryRequest, request: Request):
-    """Streaming RAG pipeline via Server-Sent Events."""
-    pool = request.app.state.pg_pool
-    qdrant = request.app.state.qdrant
-    redis_client = request.app.state.redis
-
-    # Load session context if multi-turn
-    history: list[ConversationMessage] = []
-    summary: str | None = None
-    session_id = req.session_id
-    search_query = req.query
-
-    if session_id:
-        if not session_exists(session_id, redis_client):
-            session_id = create_session(redis_client)
-
-        history = get_recent_messages(session_id, redis_client)
-        summary = get_summary(session_id, redis_client)
-
-        # Rewrite query with context
-        if history:
-            search_query = rewrite_query(req.query, history, summary)
-
-        # Save user message
-        add_message(session_id, ConversationMessage(
-            role="user",
-            content=req.query,
-            token_count=_count_tokens_approx(req.query),
-        ), redis_client)
-
-    # Embed (possibly rewritten) query
-    query_embedding = embed_query(search_query)
-
-    # Cache check (keyed on rewritten query text)
-    if req.use_cache:
-        cached = _safe_cache_get(search_query, redis_client)
-        if cached is not None:
-            if session_id:
-                add_message(session_id, ConversationMessage(
-                    role="assistant",
-                    content=cached.answer,
-                    token_count=_count_tokens_approx(cached.answer),
-                ), redis_client)
-            async def _cached():
-                yield f"data: {json.dumps({'token': cached.answer, 'done': True, 'session_id': session_id})}\n\n"
-            return StreamingResponse(_cached(), media_type="text/event-stream")
-
-    # Shared parallel retrieval + rerank
-    top_chunks = retrieve_and_rerank(
-        search_query, query_embedding, pool, qdrant, req.filters, req.top_k
-    )
-
-    if not top_chunks:
-        async def _empty():
-            yield f"data: {json.dumps({'token': 'No relevant information found.', 'done': True, 'session_id': session_id})}\n\n"
-        return StreamingResponse(_empty(), media_type="text/event-stream")
-
-    # Stream LLM tokens
-    async def _stream():
-        sources = [
-            {"source_path": c.source_path, "section_path": c.section_path, "score": c.score}
-            for c in top_chunks
-        ]
-        yield f"data: {json.dumps({'sources': sources, 'session_id': session_id})}\n\n"
-
-        full_answer = []
-        async for token in generate_stream(search_query, top_chunks, history, summary):
-            full_answer.append(token)
-            yield f"data: {json.dumps({'token': token})}\n\n"
-
-        answer_text = "".join(full_answer)
-
-        # Save assistant response to session
-        if session_id:
-            add_message(session_id, ConversationMessage(
-                role="assistant",
-                content=answer_text,
-                token_count=_count_tokens_approx(answer_text),
-            ), redis_client)
-
-        # Cache + log, parity with the blocking pipeline (best-effort)
-        response = QueryResponse(
-            answer=answer_text,
-            sources=top_chunks,
-            cached=False,
-            session_id=session_id,
-            model_used=settings.ollama_model,
-            prompt_version=PROMPT_VERSION,
+def query_stream_endpoint(
+    req: QueryRequest, request: Request, principal: Annotated[Principal, Depends(require_principal)]
+):
+    # Hold admission through the whole stream, including disconnect cleanup.
+    if not _slots.acquire(blocking=False):
+        raise HTTPException(503, "Query capacity exceeded", headers={"Retry-After": "1"})
+    pool, redis_client = request.app.state.pg_pool, request.app.state.redis
+    try:
+        state = prepare_query(
+            scoped_request(req, principal),
+            pool,
+            request.app.state.qdrant,
+            redis_client,
+            principal.owner,
         )
-        _safe_cache_set(search_query, response, redis_client)
-        _safe_log_query(req, top_chunks, response, pool)
+    except BaseException:
+        _slots.release()
+        raise
 
-        yield f"data: {json.dumps({'done': True})}\n\n"
+    async def stream():
+        try:
+            if state.cached:
+                yield _event(
+                    {
+                        "token": state.cached.answer,
+                        "sources": [s.model_dump() for s in state.cached.sources],
+                        "cached": True,
+                        "done": True,
+                    }
+                )
+                return
+            yield _event(
+                {"sources": [s.model_dump() for s in state.chunks], "session_id": req.session_id}
+            )
+            parts = []
+            if state.chunks:
+                async for token in generate_stream(
+                    state.search_query, state.chunks, state.history, state.summary
+                ):
+                    parts.append(token)
+                    yield _event({"token": token})
+            else:
+                parts.append(NO_RESULTS)
+                yield _event({"token": NO_RESULTS})
+            await run_in_threadpool(complete_query, state, "".join(parts), pool, redis_client)
+            yield _event({"done": True})
+        except Exception:
+            log.warning("Streaming query failed")
+            yield _event({"error": "Query failed; please retry", "done": True})
 
-    return StreamingResponse(_stream(), media_type="text/event-stream")
+    class ManagedStream(StreamingResponse):
+        async def __call__(self, scope, receive, send):
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                _slots.release()
+                await run_in_threadpool(release_query, state)
+
+    return ManagedStream(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

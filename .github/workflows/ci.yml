@@ -1,0 +1,55 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    services:
+      qdrant:
+        image: qdrant/qdrant@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
+        ports: ["6333:6333"]
+      postgres:
+        image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+        env:
+          POSTGRES_USER: ragtest
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: ragtest
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ragtest -d ragtest"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TEST_QDRANT_URL: http://localhost:6333
+      TEST_DATABASE_URL: postgresql://ragtest:test-only@localhost:5432/ragtest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install uv==0.11.2
+      - run: uv sync --locked --extra dev
+      - run: uv run --locked --extra dev ruff check .
+      - run: uv run --locked --extra dev ruff format --check .
+      - run: uv run --locked --extra dev mypy --python-version ${{ matrix.python }}
+      - run: uv run --locked --extra dev pytest -q --cov=shared --cov=services --cov-report=term-missing
+      - run: uv build
+  container:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker build --tag production-rag:ci .
+      - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from sentence_transformers import SentenceTransformer, CrossEncoder; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("002_recoverable_ingestion.sql").is_file()'

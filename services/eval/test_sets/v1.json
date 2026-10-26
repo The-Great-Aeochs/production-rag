@@ -1,0 +1,134 @@
+[
+  {
+    "id": "smoke-01",
+    "question": "How are bearer tokens assigned to corpora?",
+    "expected_answer": "The API_KEYS mapping assigns each query token to one corpus.",
+    "expected_sources": [
+      "auth.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-02",
+    "question": "What happens when a different token accesses a conversation session?",
+    "expected_answer": "The API returns HTTP 404.",
+    "expected_sources": [
+      "auth.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-03",
+    "question": "Are conversation answers stored in the shared response cache?",
+    "expected_answer": "No, conversation answers are not cached.",
+    "expected_sources": [
+      "cache.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-04",
+    "question": "What invalidates cached answers after document updates?",
+    "expected_answer": "The corpus revision advances on document publication and deletion.",
+    "expected_sources": [
+      "cache.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-05",
+    "question": "Where are durable ingestion jobs stored?",
+    "expected_answer": "In Postgres.",
+    "expected_sources": [
+      "ingestion.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-06",
+    "question": "How does a crashed ingestion worker release its corpus lock?",
+    "expected_answer": "The session advisory lock is released when its database connection closes.",
+    "expected_sources": [
+      "ingestion.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-07",
+    "question": "When do pending documents become visible to retrieval?",
+    "expected_answer": "After Qdrant and S3 writes succeed and Postgres marks them ready.",
+    "expected_sources": [
+      "storage.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-08",
+    "question": "Are the original PDF bytes preserved?",
+    "expected_answer": "Yes, the original binary bytes are saved in object storage.",
+    "expected_sources": [
+      "storage.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-09",
+    "question": "Which health endpoint can be used for process liveness?",
+    "expected_answer": "/health/live.",
+    "expected_sources": [
+      "health.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-10",
+    "question": "Does the metrics endpoint require authentication?",
+    "expected_answer": "Yes, an admin token.",
+    "expected_sources": [
+      "health.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-11",
+    "question": "Does PostgreSQL keyword retrieval implement BM25?",
+    "expected_answer": "No, it uses PostgreSQL full-text search ranked by ts_rank_cd.",
+    "expected_sources": [
+      "retrieval.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  },
+  {
+    "id": "smoke-12",
+    "question": "Which filters are enforced by both search backends?",
+    "expected_answer": "corpus_id, source_path, doc_type and language.",
+    "expected_sources": [
+      "retrieval.md"
+    ],
+    "filters": {
+      "corpus_id": "eval"
+    }
+  }
+]

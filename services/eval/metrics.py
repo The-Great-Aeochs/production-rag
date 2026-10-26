@@ -9,7 +9,6 @@ from statistics import mean
 
 from shared.models import EvalResult, RetrievalResult
 
-
 # --- Retrieval metrics ---
 
 
@@ -42,20 +41,20 @@ def extract_citations(answer: str) -> list[dict]:
     pattern = r"\[Source:\s*([^#\]]+?)(?:#([^\]]*))?\]"
     citations = []
     for match in re.finditer(pattern, answer):
-        citations.append({
-            "source_path": match.group(1).strip(),
-            "section": match.group(2).strip() if match.group(2) else None,
-        })
+        citations.append(
+            {
+                "source_path": match.group(1).strip(),
+                "section": match.group(2).strip() if match.group(2) else None,
+            }
+        )
     return citations
 
 
-def citation_accuracy(
-    answer: str, retrieved_chunks: list[RetrievalResult]
-) -> float:
+def citation_accuracy(answer: str, retrieved_chunks: list[RetrievalResult]) -> float:
     """Check what fraction of citations point to a retrieved chunk."""
     citations = extract_citations(answer)
     if not citations:
-        return 1.0  # no citations to be wrong about
+        return 0.0 if retrieved_chunks else 1.0
 
     retrieved_paths = {c.source_path for c in retrieved_chunks}
     verified = sum(1 for c in citations if c["source_path"] in retrieved_paths)
@@ -117,9 +116,7 @@ def aggregate_by_category(results: list[EvalResult], cases: dict[str, dict]) -> 
     return {cat: aggregate_results(cat_results) for cat, cat_results in by_cat.items()}
 
 
-def check_regression(
-    current: dict, baseline: dict, thresholds: dict | None = None
-) -> list[str]:
+def check_regression(current: dict, baseline: dict, thresholds: dict | None = None) -> list[str]:
     """Compare current eval against baseline. Return list of regressions."""
     if thresholds is None:
         thresholds = {
@@ -149,3 +146,18 @@ def check_regression(
                     f"(threshold: {threshold})"
                 )
     return regressions
+
+
+def quality_failures(summary: dict, mode: str) -> list[str]:
+    """A failed or missing quality metric must fail the release gate."""
+    targets = {"hit_rate_at_k": 0.85, "mrr": 0.70}
+    if mode == "e2e":
+        targets.update(faithfulness=0.90, correctness_pass_rate=0.75, citation_accuracy=0.90)
+    failures = []
+    if summary.get("total_cases", 0) <= 0:
+        failures.append("Evaluation contains no cases")
+    for metric, target in targets.items():
+        value = summary.get(metric)
+        if value is None or not isinstance(value, (int, float)) or not (value >= target):
+            failures.append(f"{metric} must be >= {target}; got {value}")
+    return failures

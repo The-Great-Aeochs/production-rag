@@ -26,17 +26,13 @@ def parse_pdf(content: bytes, source_path: str) -> list[Section]:
             # Fallback: entire page as one section
             text = page.get_text().strip()
             if text:
-                sections.append(
-                    Section(title=f"Page {page_num + 1}", content=text, level=0)
-                )
+                sections.append(Section(title=f"Page {page_num + 1}", content=text, level=0))
 
     doc.close()
     return sections
 
 
-def _extract_sections_from_blocks(
-    blocks: list[dict], page_num: int
-) -> list[Section]:
+def _extract_sections_from_blocks(blocks: list[dict], page_num: int) -> list[Section]:
     """Try to split page blocks into sections based on font size."""
     # Collect all text spans with their font sizes
     spans: list[tuple[float, str]] = []

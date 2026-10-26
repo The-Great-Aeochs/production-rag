@@ -1,5 +1,15 @@
 # CLAUDE.md — Production RAG System
 
+## Current production foundation
+
+The executable code and README supersede the historical design sketches below.
+Authentication maps bearer tokens to corpora; session ownership is token-scoped.
+Postgres owns the durable ingestion queue and corpus advisory locks. Pending or
+deleting documents are hidden from both retrieval backends until publication
+completes. Cache keys include authorization scope, filters, versions and corpus
+revision; conversation responses are never cached. Do not restore rounded-vector
+hash caching. Schema changes run through `python -m scripts.migrate`.
+
 ## Project Overview
 
 A production-grade Retrieval-Augmented Generation (RAG) system for technical documentation and codebases. Built from scratch (no LangChain/LlamaIndex) to maximise learning. Designed for lakhs of documents and queries. Free-tier infra where possible.
@@ -697,7 +707,7 @@ RATE_LIMITS = {
 - **Chunking:** Never fixed-size. Always structural (headers, function/class boundaries) + semantic. Maintain `parent_chunk_id`.
 - **Retrieval:** Always hybrid (semantic + keyword). RRF for merging, cross-encoder for reranking.
 - **LLM prompt:** Answer from context only. Cite as `[Source: filename#section]`. Say "I don't know" if context is insufficient.
-- **Caching:** Hash rounded embeddings for semantic deduplication.
+- **Caching:** Use exact, scoped, versioned keys. Never hash rounded embeddings.
 - **Idempotent ingestion:** Content hashing ensures re-runs are safe and skip unchanged docs.
 - **Graceful degradation:** Every downstream call has a timeout. Every timeout has a fallback.
 - **Evals run on every change** to chunking, embeddings, prompts, or retrieval logic.

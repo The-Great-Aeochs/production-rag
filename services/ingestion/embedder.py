@@ -8,7 +8,11 @@ short search *query* benefits from the recommended instruction prefix. Use
 embed_query() for queries and embed_batch() for passages.
 """
 
-from sentence_transformers import SentenceTransformer
+from threading import Lock
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 from shared.config import settings
 
@@ -16,13 +20,20 @@ from shared.config import settings
 # recall on short queries; must NOT be applied to indexed passages.
 BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
-_model: SentenceTransformer | None = None
+_model: "SentenceTransformer | None" = None
+_model_lock = Lock()
 
 
-def _get_model() -> SentenceTransformer:
+def _get_model() -> "SentenceTransformer":
     global _model
     if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
+        from sentence_transformers import SentenceTransformer
+
+        with _model_lock:
+            if _model is None:
+                _model = SentenceTransformer(
+                    settings.embedding_model, revision=settings.embedding_revision
+                )
     return _model
 
 

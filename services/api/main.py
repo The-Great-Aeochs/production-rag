@@ -1,54 +1,59 @@
-"""FastAPI application for the RAG system.
-
-Manages client lifecycles via lifespan and mounts all route modules.
-"""
+"""API lifecycle; schema changes are applied explicitly before deployment."""
 
 import logging
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 
-from fastapi import FastAPI
+import psycopg
+import redis
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from psycopg_pool import PoolTimeout, TooManyRequests
 
-from shared.db import get_pg_pool, get_qdrant, get_redis_client, init_qdrant
+from services.api.middleware import RequestMiddleware
 from services.api.routes import health, ingest, query
 from services.ingestion import embedder
 from services.query import reranker
+from shared.db import get_pg_pool, get_qdrant, get_redis_client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-
-log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    # Startup: create shared clients
-    app.state.pg_pool = get_pg_pool()
-    app.state.qdrant = get_qdrant()
-    app.state.redis = get_redis_client()
-    init_qdrant(app.state.qdrant)
-
-    # Warm the heavy local models so the first real query doesn't pay the
-    # multi-second model-load cost inline.
-    try:
+    app.state.models_ready = False
+    with ExitStack() as cleanup:
+        app.state.pg_pool = get_pg_pool()
+        cleanup.callback(app.state.pg_pool.close)
+        app.state.qdrant = get_qdrant()
+        cleanup.callback(app.state.qdrant.close)
+        app.state.redis = get_redis_client()
+        cleanup.callback(app.state.redis.close)
+        app.state.pg_pool.wait()
+        # Fail early on schema drift; never mutate schema in an API replica.
+        with app.state.pg_pool.connection() as conn:
+            if not conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version='002_recoverable_ingestion'"
+            ).fetchone():
+                raise RuntimeError("Run python -m scripts.migrate before starting the API")
         embedder.warmup()
         reranker.warmup()
-    except Exception as e:  # best-effort — don't block startup on model load
-        log.warning(f"Model warmup failed: {e}")
-
-    log.info("All clients initialized")
-    yield
-    # Shutdown
-    app.state.pg_pool.close()
+        app.state.models_ready = True
+        try:
+            yield
+        finally:
+            app.state.models_ready = False
 
 
-app = FastAPI(
-    title="Production RAG",
-    version="0.2.0",
-    lifespan=_lifespan,
-)
-
+app = FastAPI(title="Production RAG", version="0.3.0", lifespan=_lifespan)
+app.add_middleware(RequestMiddleware)
 app.include_router(query.router)
 app.include_router(health.router)
 app.include_router(ingest.router)
+
+
+@app.exception_handler(redis.RedisError)
+@app.exception_handler(PoolTimeout)
+@app.exception_handler(TooManyRequests)
+@app.exception_handler(psycopg.OperationalError)
+async def dependency_unavailable(request: Request, exc: Exception):
+    return JSONResponse({"detail": "Dependency temporarily unavailable"}, status_code=503)
