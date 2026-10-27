@@ -13,3 +13,4 @@ outputs
 
 # The website is deployed separately; keep npm dependencies out of Python images.
 web
+deploy

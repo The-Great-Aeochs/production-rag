@@ -1,6 +1,8 @@
 # Environment
 .env
 *.env.local
+deploy/server.env
+deploy/documents/
 
 # Python
 __pycache__/

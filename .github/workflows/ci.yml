@@ -51,6 +51,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker compose --env-file deploy/server.env.example -f deploy/compose.yaml --profile release config --quiet
+      - name: Validate HTTPS gateway configuration
+        run: >-
+          docker run --rm
+          -e API_DOMAIN=api.example.com -e TLS_EMAIL=operator@example.com
+          -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: docker build --tag production-rag:ci .
       - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from sentence_transformers import SentenceTransformer, CrossEncoder; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("003_workspaces.sql").is_file()'
   web:

@@ -4,8 +4,9 @@
 
 This release establishes correctness and operational controls. It does not certify
 production capacity or answer quality. Benchmark with representative data before
-setting an SLO. Current isolation is one corpus per API token, not user SSO or
-per-document RBAC. An admin token is privileged across corpora. Store keys in a
+setting an SLO. Service keys are scoped to one corpus; signed-in Clerk users have
+database-enforced workspace memberships and roles. Per-document ACLs and enterprise
+SSO provisioning are not implemented. An admin token is privileged across corpora. Store keys in a
 secret manager, expose the API through TLS, and keep data stores private. In
 production set ENVIRONMENT=production; credentials, TLS to S3, and separate admin
 and query keys become mandatory. Configure encrypted transports to Postgres (PG_SSLMODE/PG_SSLROOTCERT),

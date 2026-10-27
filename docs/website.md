@@ -3,6 +3,9 @@
 The Next.js app in `web/` includes a public showcase, clearly labeled guided
 examples, an optional live public demo, and a signed-in workspace dashboard.
 Publishing the website and running the RAG backend are separate deployments.
+For the current Vercel URL and a step-by-step server launch, see
+[the beta launch guide](beta-launch.md). Clerk production instances require a
+domain you control; development keys can be used for testing on `vercel.app`.
 
 ## Run locally
 

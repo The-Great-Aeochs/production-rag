@@ -1,0 +1,158 @@
+# Single-server beta. Durable volumes are not a backup or high availability.
+# Run from the repository root; see docs/beta-launch.md.
+name: production-rag
+
+x-app: &app
+  image: ${RAG_IMAGE:-production-rag:beta}
+  environment: &app-environment
+    ENVIRONMENT: production
+    API_KEYS: "{}"
+    ADMIN_API_KEY: ${ADMIN_API_KEY:?Set ADMIN_API_KEY}
+    JWT_ISSUER: ${JWT_ISSUER:?Set JWT_ISSUER}
+    JWT_AUDIENCE: production-rag
+    JWT_AUTHORIZED_PARTIES: ${JWT_AUTHORIZED_PARTIES:?Set JWT_AUTHORIZED_PARTIES}
+    PG_HOST: postgres
+    PG_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD}
+    PG_SSLMODE: disable
+    PG_POOL_MIN_SIZE: "1"
+    PG_POOL_MAX_SIZE: "4"
+    REDIS_URL: redis://:${REDIS_PASSWORD:?Use a hex REDIS_PASSWORD}@redis:6379
+    QDRANT_URL: http://qdrant:6333
+    QDRANT_API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY}
+    MINIO_ENDPOINT: ${MINIO_ENDPOINT:?Set the external S3-compatible endpoint}
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set the scoped S3 access key}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set the scoped S3 secret key}
+    MINIO_BUCKET: ${MINIO_BUCKET:-raw-docs}
+    MINIO_SECURE: "true"
+    OLLAMA_URL: http://ollama:11434
+    OLLAMA_MODEL: ${OLLAMA_MODEL:-hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL}
+    INGEST_ROOT: /documents
+    MAX_CONCURRENT_QUERIES: "1"
+    EMBEDDING_BATCH_SIZE: "8"
+    INGESTION_BATCH_SIZE: "4"
+    TOKENIZERS_PARALLELISM: "false"
+    OMP_NUM_THREADS: "1"
+    LOG_QUERY_CONTENT: "false"
+    DEMO_ENABLED: ${DEMO_ENABLED:-false}
+    DEMO_PROXY_SECRET: ${DEMO_PROXY_SECRET:-}
+    DEMO_QUERIES_PER_MINUTE: "3"
+    DEMO_QUERIES_PER_DAY: "30"
+  volumes:
+    - model_cache:/models
+    - ./documents:/documents:ro
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  init: true
+  restart: unless-stopped
+  logging: &logs
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab
+    environment:
+      POSTGRES_DB: ragdb
+      POSTGRES_USER: raguser
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD}
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U raguser -d ragdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging: *logs
+
+  redis:
+    image: redis:7-alpine@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
+    command: [redis-server, --appendonly, "yes", --requirepass, "${REDIS_PASSWORD:?Set REDIS_PASSWORD}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging: *logs
+
+  qdrant:
+    image: qdrant/qdrant@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Set QDRANT_API_KEY}
+    volumes: [qdrant_data:/qdrant/storage]
+    restart: unless-stopped
+    logging: *logs
+
+  ollama:
+    image: ollama/ollama@sha256:dea72d1e22270fe095b68fdf756d2b489d615643c5a2eaebbc5f569181e322d8
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    volumes: [ollama_data:/root/.ollama]
+    restart: unless-stopped
+    logging: *logs
+
+  api:
+    <<: *app
+    build:
+      context: ..
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      qdrant: {condition: service_started}
+      ollama: {condition: service_started}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 180s
+
+  worker:
+    <<: *app
+    command: [python, -m, services.ingestion.worker]
+    depends_on:
+      postgres: {condition: service_healthy}
+      qdrant: {condition: service_started}
+    stop_grace_period: 90s
+
+  release:
+    <<: *app
+    profiles: [release]
+    command: [python, -m, scripts.migrate]
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  gateway:
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set the backend DNS hostname}
+      TLS_EMAIL: ${TLS_EMAIL:?Set the certificate contact email}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+    logging: *logs
+
+volumes:
+  pg_data:
+  redis_data:
+  qdrant_data:
+  ollama_data:
+  model_cache:
+  caddy_data:
+  caddy_config:

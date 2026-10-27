@@ -26,6 +26,9 @@ Use Node.js 24. Empty credentials serve the showcase and prewritten examples;
 private workspaces require configured login and a running backend. For Vercel,
 set Root Directory to `web`. See [website deployment and RBAC](docs/website.md)
 for Clerk setup, migration, roles, source connections, demo quotas, and costs.
+[The beta launch guide](docs/beta-launch.md) covers the existing Vercel site,
+Clerk development versus production identity, a separate server stack, and
+automated deployment checks.
 [UI design notes](docs/ui-design.md) explain the interface and frontend structure.
 
 ## Architecture
