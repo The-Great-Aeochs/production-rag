@@ -29,6 +29,7 @@ for Clerk setup, migration, roles, source connections, demo quotas, and costs.
 [The beta launch guide](docs/beta-launch.md) covers the existing Vercel site,
 Clerk development versus production identity, a separate server stack, and
 automated deployment checks.
+For the free-server route, see [Oracle Always Free setup](docs/oracle-free-tier.md).
 [UI design notes](docs/ui-design.md) explain the interface and frontend structure.
 
 ## Architecture

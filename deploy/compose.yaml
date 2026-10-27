@@ -23,6 +23,7 @@ x-app: &app
     MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set the scoped S3 access key}
     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set the scoped S3 secret key}
     MINIO_BUCKET: ${MINIO_BUCKET:-raw-docs}
+    MINIO_REGION: ${MINIO_REGION:-}
     MINIO_SECURE: "true"
     OLLAMA_URL: http://ollama:11434
     OLLAMA_MODEL: ${OLLAMA_MODEL:-hf.co/unsloth/Qwen3-8B-GGUF:UD-Q4_K_XL}

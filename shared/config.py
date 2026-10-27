@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     minio_root_user: str = ""
     minio_root_password: str = Field(default="", repr=False)
     minio_bucket: str = "raw-docs"
+    minio_region: str | None = None
     minio_secure: bool = False
     redis_url: str = Field(default="redis://localhost:6379", repr=False)
     cache_ttl: int = Field(default=3600, ge=1)

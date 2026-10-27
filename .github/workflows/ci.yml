@@ -47,7 +47,11 @@ jobs:
       - run: uv build
   container:
     needs: checks
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,6 +65,8 @@ jobs:
           caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: docker build --tag production-rag:ci .
       - run: docker run --rm production-rag:ci python -c 'from services.api.main import app; from sentence_transformers import SentenceTransformer, CrossEncoder; from importlib.resources import files; assert files("prompts").joinpath("system_v1.txt").is_file(); assert files("migrations").joinpath("003_workspaces.sql").is_file()'
+      - name: Verify CPU-only inference dependencies
+        run: docker run --rm production-rag:ci python -c 'import torch; assert torch.version.cuda is None; assert not torch.backends.cuda.is_built()'
   web:
     runs-on: ubuntu-latest
     timeout-minutes: 10

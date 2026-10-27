@@ -104,6 +104,7 @@ def get_minio() -> Minio:
         access_key=settings.minio_root_user,
         secret_key=settings.minio_root_password,
         secure=settings.minio_secure,
+        region=settings.minio_region or None,
         http_client=urllib3.PoolManager(
             timeout=urllib3.Timeout(
                 connect=settings.dependency_timeout_s, read=settings.dependency_timeout_s

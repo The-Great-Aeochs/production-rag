@@ -16,6 +16,8 @@ and object-storage option. Signup requires card verification; capacity and
 must be checked in the account before creating anything. Select only resources
 marked Always Free; trial credits are temporary. Idle instances can be reclaimed.
 No Oracle account or resources are included or automatically created here.
+[The Oracle setup guide](oracle-free-tier.md) gives the exact console choices,
+network rules, private bucket policy, and S3 verification command for this route.
 
 Do not choose a small free web-service instance just because it accepts a
 Dockerfile. Both API and worker load embedding weights, and Ollama also needs
